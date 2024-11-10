@@ -23,6 +23,9 @@ from config import (
 from pprint import pformat
 import math
 import anthropic
+from cloudinary.uploader import upload
+import cloudinary
+import cloudinary.api
 
 # Setup logging
 logging.basicConfig(
@@ -40,6 +43,13 @@ gallery_file = "data/gallery_data.json"
 if not os.path.exists(gallery_file):
     with open(gallery_file, "w") as f:
         json.dump([], f)
+
+# Update the Cloudinary configuration
+cloudinary.config(
+    cloud_name = os.getenv('CLOUDINARY_CLOUD_NAME'),
+    api_key = os.getenv('CLOUDINARY_API_KEY'),
+    api_secret = os.getenv('CLOUDINARY_API_SECRET')
+)
 
 # First define the class
 class ArtGenerator:
@@ -564,96 +574,60 @@ Keep your reflection personal and introspective, as if sharing with a friend."""
                 await asyncio.sleep(2)
 
     async def save_to_gallery(self, canvas_data: str):
-        """Save drawing to gallery"""
+        """Save drawing to gallery using Cloudinary"""
         try:
             if not self.current_drawing:
                 logger.error("No current drawing to save")
                 return False
 
-            # Ensure we have all required data
-            required_fields = ["id", "idea", "timestamp"]
-            missing_fields = [field for field in required_fields if field not in self.current_drawing]
-            if missing_fields:
-                logger.error(f"Missing required fields: {missing_fields}")
-                return False
-
-            # Create directories if they don't exist
-            os.makedirs("static/gallery", exist_ok=True)
-            os.makedirs("data", exist_ok=True)
-
-            try:
-                # Remove data URL prefix and decode
-                img_data = canvas_data.split(',')[1]
-                img_bytes = base64.b64decode(img_data)
-            except Exception as e:
-                logger.error(f"Error processing canvas data: {e}")
-                return False
+            logger.info("Processing canvas data for upload...")
+            img_data = canvas_data.split(',')[1]
+            img_bytes = base64.b64decode(img_data)
             
-            # Save image file with error handling
-            filename = f"drawing_{self.current_drawing['id']}.png"
-            filepath = os.path.join("static/gallery", filename)
+            logger.info("Uploading to Cloudinary...")
+            upload_result = upload(
+                img_bytes,
+                folder="iris_gallery",
+                public_id=f"drawing_{self.current_drawing['id']}",
+                resource_type="image"
+            )
             
-            try:
-                # Save image with PIL for better error handling
-                image = Image.open(BytesIO(img_bytes))
-                image.save(filepath, "PNG")
-                logger.info(f"Saved image to {filepath}")
-            except Exception as e:
-                logger.error(f"Error saving image file: {e}")
+            # Log the upload result
+            logger.info(f"Cloudinary upload result: {upload_result}")
+            
+            image_url = upload_result.get('secure_url')
+            if not image_url:
+                logger.error("No URL in upload result")
                 return False
             
-            # Save metadata with backup
+            logger.info(f"Successfully uploaded to Cloudinary: {image_url}")
+            
+            # Save metadata
             gallery_file = "data/gallery_data.json"
-            backup_file = f"{gallery_file}.backup"
+            gallery_data = []
             
-            try:
-                # Load existing data
-                gallery_data = []
-                if os.path.exists(gallery_file):
-                    with open(gallery_file, "r") as f:
-                        gallery_data = json.load(f)
-                        
-                        # Create backup
-                        with open(backup_file, "w") as f:
-                            json.dump(gallery_data, f, indent=2)
+            if os.path.exists(gallery_file):
+                with open(gallery_file, "r") as f:
+                    gallery_data = json.load(f)
+            
+            new_entry = {
+                "id": self.current_drawing["id"],
+                "url": image_url,  # Store the Cloudinary URL
+                "description": self.current_drawing.get("idea", "Geometric pattern"),
+                "reflection": self.current_reflection or "",
+                "timestamp": datetime.now().isoformat(),
+                "votes": 0
+            }
+            
+            logger.info(f"Adding new entry: {new_entry}")
+            gallery_data.insert(0, new_entry)
+            
+            with open(gallery_file, "w") as f:
+                json.dump(gallery_data, f, indent=2)
                 
-                # Create new gallery entry
-                new_entry = {
-                    "id": self.current_drawing["id"],
-                    "filename": filename,
-                    "description": self.current_drawing["idea"],
-                    "reflection": self.current_reflection or "",
-                    "timestamp": self.current_drawing["timestamp"],
-                    "votes": 0,
-                    "has_reflection": bool(self.current_reflection),
-                    "pixel_count": self.current_drawing.get("pixel_count", 0)
-                }
+            logger.info("Successfully saved to gallery")
+            return True
                 
-                # Add to beginning of list
-                gallery_data.insert(0, new_entry)
-                
-                # Save updated gallery data
-                with open(gallery_file, "w") as f:
-                    json.dump(gallery_data, f, indent=2)
-                
-                # Remove backup if successful
-                if os.path.exists(backup_file):
-                    os.remove(backup_file)
-                    
-                logger.info(f"Successfully saved gallery entry: {new_entry['id']}")
-                return True
-                    
-            except Exception as e:
-                logger.error(f"Error saving gallery data: {e}")
-                # Restore from backup if available
-                if os.path.exists(backup_file):
-                    try:
-                        os.replace(backup_file, gallery_file)
-                        logger.info("Restored gallery data from backup")
-                    except Exception as backup_error:
-                        logger.error(f"Error restoring backup: {backup_error}")
-                return False
-                    
         except Exception as e:
             logger.error(f"Error in save_to_gallery: {e}")
             return False
@@ -725,6 +699,44 @@ Keep your reflection personal and introspective, as if sharing with a friend."""
         
         return round(score, 2)
 
+# Add this function to migrate old gallery data
+async def migrate_gallery_data():
+    """Migrate old gallery data to use Cloudinary URLs"""
+    try:
+        gallery_file = "data/gallery_data.json"
+        if not os.path.exists(gallery_file):
+            return
+            
+        with open(gallery_file, "r") as f:
+            items = json.load(f)
+            
+        updated = False
+        for item in items:
+            if "filename" in item and not item.get("url"):
+                try:
+                    # Upload to Cloudinary
+                    filepath = os.path.join("static/gallery", item["filename"])
+                    if os.path.exists(filepath):
+                        with open(filepath, "rb") as img_file:
+                            upload_result = upload(
+                                img_file,
+                                folder="iris_gallery",
+                                public_id=f"drawing_{item['id']}",
+                                resource_type="image"
+                            )
+                            item["url"] = upload_result["secure_url"]
+                            updated = True
+                except Exception as e:
+                    logger.error(f"Error migrating item {item['id']}: {e}")
+                    
+        if updated:
+            with open(gallery_file, "w") as f:
+                json.dump(items, f, indent=2)
+                logger.info("Gallery data migrated to use Cloudinary URLs")
+                
+    except Exception as e:
+        logger.error(f"Error migrating gallery data: {e}")
+
 # Create the generator before the lifespan
 generator = ArtGenerator()
 
@@ -733,7 +745,7 @@ generator = ArtGenerator()
 async def lifespan(app: FastAPI):
     try:
         logger.info("Initializing IRIS...")
-        # Remove the initialize_stats call since we now do it synchronously in __init__
+        await migrate_gallery_data()  # Add this line
         asyncio.create_task(generator.start())
         logger.info("IRIS initialized successfully")
         yield
@@ -844,15 +856,22 @@ async def get_gallery(sort: str = "new", limit: int = 50, offset: int = 0):
         gallery_file = "data/gallery_data.json"
         logger.info(f"Loading gallery from {gallery_file}")
         
+        # Check if file exists
         if not os.path.exists(gallery_file):
-            logger.warning("Gallery file not found, creating empty gallery")
+            logger.warning(f"Gallery file not found at {os.path.abspath(gallery_file)}")
+            # Initialize with empty array
             with open(gallery_file, "w") as f:
                 json.dump([], f)
             return {"success": True, "items": []}
             
+        # Read gallery data
         with open(gallery_file, "r") as f:
             items = json.load(f)
             logger.info(f"Loaded {len(items)} items from gallery")
+            
+            # Log first item for debugging
+            if items:
+                logger.info(f"Sample item: {items[0]}")
             
             # Sort items
             if sort == "votes":
@@ -860,7 +879,6 @@ async def get_gallery(sort: str = "new", limit: int = 50, offset: int = 0):
             else:  # sort by new
                 items.sort(key=lambda x: x["timestamp"], reverse=True)
             
-            # Add success flag to match frontend expectations
             return {
                 "success": True,
                 "items": items
@@ -868,6 +886,7 @@ async def get_gallery(sort: str = "new", limit: int = 50, offset: int = 0):
         
     except Exception as e:
         logger.error(f"Error loading gallery: {e}")
+        logger.error(f"Current working directory: {os.getcwd()}")
         return {"success": False, "error": str(e)}
 
 @app.get("/static/gallery/{filename}")

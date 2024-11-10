@@ -433,52 +433,56 @@ GALLERY_TEMPLATE = """
                 const data = await response.json();
                 console.log('Gallery data:', data);
                 
-                if (!data.success) {
-                    throw new Error(data.error || 'Failed to load gallery');
-                }
-                
-                const items = data.items;
-                if (!items || !items.length) {
+                if (!data.success || !data.items || !data.items.length) {
                     container.innerHTML = '<p class="gallery-empty">No artworks yet. Check back soon!</p>';
                     return;
                 }
                 
-                // Debug log
-                console.log(`Rendering ${items.length} gallery items`);
-                
-                container.innerHTML = items.map(item => `
-                    <div class="gallery-item" data-id="${item.id}">
-                        <img src="/static/gallery/${item.filename}" 
-                             alt="${item.description}" 
-                             loading="lazy"
-                             onerror="console.error('Failed to load image:', '${item.filename}')"
-                        />
-                        <div class="item-details">
-                            <p class="description">${item.description}</p>
-                            <div class="item-meta">
-                                <span>${new Date(item.timestamp).toLocaleString()}</span>
-                            </div>
-                            <div class="vote-section">
-                                <div class="vote-count">
-                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                                        <path d="M12 4l-8 8h6v8h4v-8h6z"/>
-                                    </svg>
-                                    <span>${item.votes || 0}</span>
+                container.innerHTML = data.items.map(item => {
+                    console.log('Processing gallery item:', item);
+                    
+                    // Handle both old and new formats
+                    const imageUrl = item.url || (item.filename ? `/static/gallery/${item.filename}` : null);
+                    
+                    if (!imageUrl) {
+                        console.error('Missing URL/filename for item:', item);
+                        return '';
+                    }
+                    
+                    return `
+                        <div class="gallery-item" data-id="${item.id}">
+                            <img src="${imageUrl}" 
+                                 alt="${item.description || 'Geometric pattern'}" 
+                                 loading="lazy"
+                                 onerror="console.error('Failed to load image:', '${imageUrl}')"
+                            />
+                            <div class="item-details">
+                                <p class="description">${item.description || 'Geometric pattern'}</p>
+                                <div class="item-meta">
+                                    <span>${new Date(item.timestamp).toLocaleString()}</span>
                                 </div>
-                                <button class="vote-button ${votedImages.has(item.id) ? 'voted' : ''}" 
-                                        data-id="${item.id}" 
-                                        ${votedImages.has(item.id) ? 'disabled' : ''}>
-                                    ${votedImages.has(item.id) ? '✓ Voted' : '↑ Upvote'}
-                                </button>
-                                <button class="share-button" onclick="shareArtwork('${item.id}', '${item.description.replace(/'/g, "\\'")}')" title="Share">
-                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                                        <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
-                                    </svg>
-                                </button>
+                                <div class="vote-section">
+                                    <div class="vote-count">
+                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                                            <path d="M12 4l-8 8h6v8h4v-8h6z"/>
+                                        </svg>
+                                        <span>${item.votes || 0}</span>
+                                    </div>
+                                    <button class="vote-button ${votedImages.has(item.id) ? 'voted' : ''}" 
+                                            data-id="${item.id}" 
+                                            ${votedImages.has(item.id) ? 'disabled' : ''}>
+                                        ${votedImages.has(item.id) ? '✓ Voted' : '↑ Upvote'}
+                                    </button>
+                                    <button class="share-button" onclick="shareArtwork('${item.id}', '${(item.description || 'Geometric pattern').replace(/'/g, "\\'")}')" title="Share">
+                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                                            <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
+                                        </svg>
+                                    </button>
+                                </div>
                             </div>
                         </div>
-                    </div>
-                `).join('');
+                    `;
+                }).filter(Boolean).join('');
 
                 // Add click handlers for vote buttons
                 container.querySelectorAll('.vote-button:not(.voted)').forEach(button => {
@@ -608,12 +612,29 @@ GALLERY_TEMPLATE = """
         // Make sure this initialization code is present
         document.addEventListener('DOMContentLoaded', () => {
             console.log('Initializing gallery...');
-            const container = document.getElementById('gallery-container');
-            if (!container) {
-                console.error('Gallery container not found!');
-                return;
-            }
             loadGallery('new');
+
+            // Setup WebSocket for real-time updates
+            const ws = new WebSocket(`${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`);
+            
+            ws.onopen = () => {
+                console.log('WebSocket connected');
+            };
+            
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                console.log('Received:', data);
+                
+                if (data.type === 'gallery_update') {
+                    console.log('Gallery update received, reloading...');
+                    loadGallery(currentSort);
+                }
+            };
+
+            ws.onclose = () => {
+                console.log('WebSocket disconnected');
+                setTimeout(() => location.reload(), 1000);
+            };
         });
     </script>
 </body>
@@ -1209,6 +1230,7 @@ HTML_TEMPLATE = """
         .vote-button:hover:not(.voted) {
             background: var(--primary);
             color: var(--bg-darker);
+            transform: translateY(-2px);
         }
 
         .vote-button.voted {
