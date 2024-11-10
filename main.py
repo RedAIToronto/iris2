@@ -849,6 +849,17 @@ IMPORTANT:
         
         return round(score, 2)
 
+    async def initialize(self):
+        """Async initialization"""
+        try:
+            self.last_generation_time = await db_service.get_last_generation_time()
+            logger.info(f"Initialized last generation time: {self.last_generation_time}")
+        except Exception as e:
+            logger.error(f"Error initializing generation time: {e}")
+            # Set a safe default if we can't get the last generation time
+            self.last_generation_time = datetime.now() - timedelta(minutes=5)
+            logger.info(f"Using default generation time: {self.last_generation_time}")
+
 # Add this function to migrate old gallery data
 async def migrate_gallery_data():
     """Migrate old gallery data to use Cloudinary URLs"""
