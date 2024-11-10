@@ -425,24 +425,38 @@ GALLERY_TEMPLATE = """
 
         async function loadGallery(sort = 'new') {
             try {
-                const response = await fetch(`/api/gallery?sort=${sort}`);
-                if (!response.ok) throw new Error('Failed to load gallery');
-                
-                const items = await response.json();
+                console.log('Loading gallery...');
                 const container = document.getElementById('gallery-container');
+                container.innerHTML = '<div class="gallery-loading">Loading gallery...</div>';
                 
-                if (!items.length) {
-                    container.innerHTML = '<p style="text-align: center; color: var(--primary); grid-column: 1/-1;">No artworks yet. Check back soon!</p>';
+                const response = await fetch(`/api/gallery?sort=${sort}`);
+                const data = await response.json();
+                console.log('Gallery data:', data);
+                
+                if (!data.success) {
+                    throw new Error(data.error || 'Failed to load gallery');
+                }
+                
+                const items = data.items;
+                if (!items || !items.length) {
+                    container.innerHTML = '<p class="gallery-empty">No artworks yet. Check back soon!</p>';
                     return;
                 }
                 
+                // Debug log
+                console.log(`Rendering ${items.length} gallery items`);
+                
                 container.innerHTML = items.map(item => `
-                    <div class="gallery-item">
-                        <img src="/static/gallery/${item.filename}" alt="${item.description}">
+                    <div class="gallery-item" data-id="${item.id}">
+                        <img src="/static/gallery/${item.filename}" 
+                             alt="${item.description}" 
+                             loading="lazy"
+                             onerror="console.error('Failed to load image:', '${item.filename}')"
+                        />
                         <div class="item-details">
                             <p class="description">${item.description}</p>
                             <div class="item-meta">
-                                <span>Created: ${new Date(item.timestamp).toLocaleString()}</span>
+                                <span>${new Date(item.timestamp).toLocaleString()}</span>
                             </div>
                             <div class="vote-section">
                                 <div class="vote-count">
@@ -456,9 +470,9 @@ GALLERY_TEMPLATE = """
                                         ${votedImages.has(item.id) ? 'disabled' : ''}>
                                     ${votedImages.has(item.id) ? '✓ Voted' : '↑ Upvote'}
                                 </button>
-                                <button class="share-button" onclick="shareArtwork('${item.id}', '${item.description}')" title="Share">
+                                <button class="share-button" onclick="shareArtwork('${item.id}', '${item.description.replace(/'/g, "\\'")}')" title="Share">
                                     <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                                        <path d="M18 8h-7v2h7v11H6V10h7V8H6a2 2 0 00-2 2v11a2 2 0 002 2h12a2 2 0 002-2V10a2 2 0 00-2-2zm-3-6l-1.41 1.41L16.17 6H11v2h5.17l-2.58 2.59L15 12l5-5-5-5z"/>
+                                        <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
                                     </svg>
                                 </button>
                             </div>
@@ -470,9 +484,12 @@ GALLERY_TEMPLATE = """
                 container.querySelectorAll('.vote-button:not(.voted)').forEach(button => {
                     button.addEventListener('click', () => handleVote(button));
                 });
+                
+                console.log('Gallery rendered successfully');
+                
             } catch (error) {
                 console.error('Error loading gallery:', error);
-                container.innerHTML = '<p style="text-align: center; color: #ff0000; grid-column: 1/-1;">Error loading gallery. Please try again later.</p>';
+                container.innerHTML = '<p class="gallery-error">Error loading gallery. Please try again later.</p>';
             }
         }
 
@@ -550,6 +567,54 @@ GALLERY_TEMPLATE = """
 
         // Refresh gallery periodically
         setInterval(() => loadGallery(currentSort), 30000);
+
+        // Setup WebSocket for real-time updates
+        function connectWebSocket() {
+            console.log('Connecting to WebSocket...');
+            const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`;
+            console.log('WebSocket URL:', wsUrl);
+            
+            const ws = new WebSocket(wsUrl);
+            
+            ws.onopen = () => {
+                console.log('WebSocket connected');
+                loadGallery(currentSort);
+            };
+            
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                console.log('Received:', data);
+                
+                if (data.type === 'gallery_update') {
+                    loadGallery(currentSort);
+                } else if (data.type === 'vote_update') {
+                    updateVoteCount(data.image_id, data.votes);
+                }
+            };
+            
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+            };
+            
+            ws.onclose = () => {
+                console.log('WebSocket disconnected');
+                setTimeout(connectWebSocket, 1000);
+            };
+        }
+        
+        // Initialize WebSocket connection
+        connectWebSocket();
+
+        // Make sure this initialization code is present
+        document.addEventListener('DOMContentLoaded', () => {
+            console.log('Initializing gallery...');
+            const container = document.getElementById('gallery-container');
+            if (!container) {
+                console.error('Gallery container not found!');
+                return;
+            }
+            loadGallery('new');
+        });
     </script>
 </body>
 </html>
@@ -1548,6 +1613,64 @@ HTML_TEMPLATE = """
             padding: 40px;
             color: var(--primary);
         }
+
+        .gallery-button {
+            background: transparent;
+            border: 1px solid var(--primary);
+            color: var(--primary);
+            padding: 10px 20px;
+            border-radius: 20px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-family: 'Courier New', monospace;
+            margin-top: 20px;
+        }
+
+        .gallery-button:hover {
+            background: var(--primary);
+            color: var(--bg-darker);
+            transform: translateY(-2px);
+        }
+
+        .stats-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 10px;
+            margin-top: 20px;
+        }
+
+        .controls-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 10px;
+            margin-top: 20px;
+        }
+
+        .generation-time {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .gallery-button {
+            background: transparent;
+            border: 1px solid var(--primary);
+            color: var(--primary);
+            padding: 10px 20px;
+            border-radius: 20px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-family: 'Courier New', monospace;
+        }
+
+        .gallery-button:hover {
+            background: var(--primary);
+            color: var(--bg-darker);
+            transform: translateY(-2px);
+        }
     </style>
 </head>
 <body>
@@ -1632,19 +1755,14 @@ HTML_TEMPLATE = """
                 </div>
             </div>
 
-            <div class="stats-container">
-                <div class="stat">
-                    <span class="stat-label">Total Creations</span>
-                    <span id="totalCreations" class="stat-value">0</span>
-                </div>
-                <div class="stat">
-                    <span class="stat-label">Current Viewers</span>
-                    <span id="viewerCount" class="stat-value">0</span>
-                </div>
-                <div class="stat">
+            <div class="controls-container">
+                <div class="generation-time">
                     <span class="stat-label">Generation Time</span>
                     <span id="generationTime" class="stat-value">0s</span>
                 </div>
+                <button id="viewInGallery" class="gallery-button" style="display: none;">
+                    View in Gallery
+                </button>
             </div>
         </div>
     </main>
@@ -1652,122 +1770,187 @@ HTML_TEMPLATE = """
     <script>
         class ArtViewer {
             constructor() {
-                this.initializeElements();
-                this.initializeState();
+                console.log('Initializing ArtViewer...');
+                this.initializeCanvas();
                 this.connectWebSocket();
-                this.updateGenerationTime();
+                this.setupGalleryButton();
             }
 
-            initializeElements() {
+            initializeCanvas() {
+                console.log('Setting up canvas...');
                 this.canvas = document.getElementById('artCanvas');
                 this.ctx = this.canvas.getContext('2d');
                 this.ctx.lineCap = 'round';
                 this.ctx.lineJoin = 'round';
                 
-                // Initialize canvas
+                // Set initial black background
                 this.ctx.fillStyle = '#000000';
                 this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
-                
-                // Get UI elements
-                this.currentPhase = document.getElementById('currentPhase');
-                this.currentIdea = document.getElementById('currentIdea');
-                this.currentStatus = document.getElementById('currentStatus');
-                this.currentReflection = document.getElementById('currentReflection');
-                this.progressBar = document.getElementById('progressBar');
-                this.totalCreations = document.getElementById('totalCreations');
-                this.viewerCount = document.getElementById('viewerCount');
-                this.generationTime = document.getElementById('generationTime');
-            }
-
-            initializeState() {
-                this.ws = null;
-                this.isConnected = false;
-                this.lastGenerationTime = Date.now();
             }
 
             connectWebSocket() {
-                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                this.ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+                console.log('Connecting WebSocket...');
+                const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`;
+                console.log('WebSocket URL:', wsUrl);
+                
+                this.ws = new WebSocket(wsUrl);
                 
                 this.ws.onopen = () => {
                     console.log('WebSocket connected');
-                    this.isConnected = true;
                     this.ws.send(JSON.stringify({ type: 'subscribe_status' }));
                 };
                 
-                this.ws.onmessage = (event) => this.handleMessage(event);
+                this.ws.onmessage = (event) => {
+                    const data = JSON.parse(event.data);
+                    console.log('Received:', data);
+                    this.handleMessage(data);
+                };
+                
+                this.ws.onerror = (error) => {
+                    console.error('WebSocket error:', error);
+                };
                 
                 this.ws.onclose = () => {
                     console.log('WebSocket disconnected');
-                    this.isConnected = false;
                     setTimeout(() => this.connectWebSocket(), 1000);
                 };
             }
 
-            handleMessage(event) {
-                try {
-                    const data = JSON.parse(event.data);
-                    console.log('Received message:', data);
+            handleMessage(data) {
+                console.log('Received message:', data);
 
-                    if (data.type === 'display_update') {
-                        // Update status and idea
-                        if (data.status) {
-                            document.getElementById('currentStatus').textContent = data.status;
+                if (data.type === 'display_update') {
+                    this.updateDisplay(data);
+                    
+                    // Show gallery button when drawing is complete
+                    if (data.status === 'completed') {
+                        const galleryButton = document.getElementById('viewInGallery');
+                        if (galleryButton) {
+                            galleryButton.style.display = 'block';
                         }
-                        if (data.idea) {
-                            document.getElementById('currentIdea').textContent = data.idea;
-                        }
-                        if (data.phase) {
-                            this.updatePhase(data.phase);
-                        }
-                        if (data.progress !== undefined) {
-                            this.updateProgress(data.progress);
-                        }
-                        if (data.viewers !== undefined) {
-                            document.getElementById('viewerCount').textContent = data.viewers;
-                        }
-                        if (data.total_creations !== undefined) {
-                            document.getElementById('totalCreations').textContent = data.total_creations;
-                        }
-                    } else if (data.type === 'reflection_update') {
-                        if (data.reflection) {
-                            document.getElementById('currentReflection').textContent = data.reflection;
-                        }
-                    } else {
-                        this.executeDrawingCommand(data);
                     }
-                } catch (error) {
-                    console.error('Error handling message:', error);
+                } else if (data.type === 'request_canvas_data') {
+                    this.sendCanvasData();
+                } else if (data.type === 'gallery_update') {
+                    // Handle gallery updates
+                    if (data.action === 'new_item') {
+                        console.log('New gallery item available:', data.item);
+                        // Show gallery button
+                        const galleryButton = document.getElementById('viewInGallery');
+                        if (galleryButton) {
+                            galleryButton.style.display = 'block';
+                        }
+                    }
+                } else {
+                    this.executeDrawingCommand(data);
                 }
             }
 
-            updatePhase(phase) {
-                const phases = ['ideation', 'creation', 'reflection'];
-                phases.forEach(p => {
-                    const element = document.getElementById(`${p}Phase`);
-                    if (element) {
-                        element.classList.toggle('active', p === phase);
-                    }
-                });
-
-                // Update phase text
-                const phaseTexts = {
-                    'ideation': 'Analyzing patterns...',
-                    'generation': 'Calculating coordinates...',
-                    'drawing': 'Creating artwork...',
-                    'reflection': 'Contemplating creation...',
-                    'completed': 'Artwork complete'
-                };
+            updateDisplay(data) {
+                console.log('Updating display:', data);
                 
-                document.getElementById('currentPhase').textContent = 
-                    phaseTexts[phase] || phase;
+                // Update status
+                if (data.status) {
+                    const statusElement = document.getElementById('currentStatus');
+                    if (statusElement) {
+                        // Add special handling for resting state
+                        if (data.status === "resting") {
+                            statusElement.textContent = "Resting before next creation...";
+                        } else {
+                            statusElement.textContent = data.status;
+                        }
+                    }
+                }
+                
+                // Update stats
+                if (data.total_creations !== undefined) {
+                    const totalCreationsElement = document.getElementById('totalCreations');
+                    if (totalCreationsElement) {
+                        totalCreationsElement.textContent = data.total_creations;
+                    }
+                }
+                
+                if (data.total_pixels !== undefined) {
+                    const totalPixelsElement = document.getElementById('totalPixels');
+                    if (totalPixelsElement) {
+                        totalPixelsElement.textContent = data.total_pixels.toLocaleString();
+                    }
+                }
+                
+                if (data.viewers !== undefined) {
+                    const viewerCountElement = document.getElementById('viewerCount');
+                    if (viewerCountElement) {
+                        viewerCountElement.textContent = data.viewers;
+                    }
+                }
+                
+                // Update idea
+                if (data.idea) {
+                    const ideaElement = document.getElementById('currentIdea');
+                    if (ideaElement) {
+                        ideaElement.textContent = data.idea;
+                    }
+                }
+                
+                // Update phase
+                if (data.phase) {
+                    const phases = ['ideation', 'creation', 'reflection'];
+                    phases.forEach(phase => {
+                        const element = document.getElementById(`${phase}Phase`);
+                        if (element) {
+                            element.classList.toggle('active', phase === data.phase);
+                        }
+                    });
+                }
+                
+                // Update progress
+                if (data.progress !== undefined) {
+                    const progress = Math.round(data.progress);
+                    const progressBar = document.getElementById('progressBar');
+                    const progressText = document.getElementById('progressText');
+                    if (progressBar) {
+                        progressBar.style.width = `${progress}%`;
+                    }
+                    if (progressText) {
+                        progressText.textContent = `${progress}%`;
+                    }
+                }
+                
+                // Update reflection
+                if (data.reflection) {
+                    const reflectionElement = document.getElementById('currentReflection');
+                    if (reflectionElement) {
+                        reflectionElement.textContent = data.reflection;
+                    }
+                }
+
+                // Update generation time
+                const timeSinceStart = Math.floor((Date.now() - this.lastGenerationTime) / 1000);
+                const generationTimeElement = document.getElementById('generationTime');
+                if (generationTimeElement) {
+                    generationTimeElement.textContent = `${timeSinceStart}s`;
+                }
+
+                // Show gallery button when drawing is complete
+                if (data.status === 'completed') {
+                    const galleryButton = document.getElementById('viewInGallery');
+                    if (galleryButton) {
+                        galleryButton.style.display = 'block';
+                    }
+                }
             }
 
-            updateProgress(progress) {
-                const progressBar = document.getElementById('progressBar');
-                if (progressBar) {
-                    progressBar.style.width = `${progress}%`;
-                }
+            // Add method to update stats periodically
+            updateStats() {
+                setInterval(async () => {
+                    try {
+                        const response = await fetch('/api/status');
+                        const data = await response.json();
+                        this.updateDisplay(data);
+                    } catch (error) {
+                        console.error('Error updating stats:', error);
+                    }
+                }, 5000); // Update every 5 seconds
             }
 
             executeDrawingCommand(cmd) {
@@ -1796,7 +1979,8 @@ HTML_TEMPLATE = """
             }
 
             sendCanvasData() {
-                if (this.isConnected && this.canvas) {
+                if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                    console.log('Sending canvas data...');
                     this.ws.send(JSON.stringify({
                         type: 'canvas_data',
                         data: this.canvas.toDataURL()
@@ -1804,332 +1988,19 @@ HTML_TEMPLATE = """
                 }
             }
 
-            updateGenerationTime() {
-                setInterval(() => {
-                    if (this.generationTime) {
-                        const elapsed = Math.floor((Date.now() - this.lastGenerationTime) / 1000);
-                        this.generationTime.textContent = `${elapsed}s`;
-                    }
-                }, 1000);
+            setupGalleryButton() {
+                const galleryButton = document.getElementById('viewInGallery');
+                if (galleryButton) {
+                    galleryButton.style.display = 'none'; // Hide initially
+                    galleryButton.addEventListener('click', () => {
+                        window.location.href = '/gallery';
+                    });
+                }
             }
         }
 
         // Initialize viewer when page loads
         window.onload = () => new ArtViewer();
-
-        function updatePhases(data) {
-            const phases = ['ideation', 'creation', 'reflection'];
-            phases.forEach(phase => {
-                const element = document.getElementById(`${phase}Phase`);
-                element.classList.toggle('active', data.phase === phase);
-            });
-
-            if (data.type === 'reflection_update') {
-                document.getElementById('currentReflection').textContent = data.reflection;
-                document.getElementById('totalCreations').textContent = data.total_creations;
-            }
-
-            if (data.progress !== undefined) {
-                const progress = Math.round(data.progress);
-                document.getElementById('progressBar').style.width = `${progress}%`;
-                document.getElementById('progressText').textContent = `${progress}%`;
-            }
-
-            if (data.idea) {
-                document.getElementById('currentIdea').textContent = data.idea;
-            }
-
-            document.getElementById('currentStatus').textContent = data.status || 'Thinking...';
-        }
-
-        function showInfoModal() {
-            document.getElementById('infoModal').style.display = 'block';
-            document.body.style.overflow = 'hidden';
-        }
-
-        function hideInfoModal() {
-            document.getElementById('infoModal').style.display = 'none';
-            document.body.style.overflow = 'auto';
-        }
-
-        // Close modal when clicking outside
-        window.onclick = function(event) {
-            const modal = document.getElementById('infoModal');
-            if (event.target === modal) {
-                hideInfoModal();
-            }
-        }
-
-        // Close modal with Escape key
-        document.addEventListener('keydown', function(event) {
-            if (event.key === 'Escape') {
-                hideInfoModal();
-            }
-        });
-
-        // Add these functions to handle reflection modal
-        function showReflection(id, reflection) {
-            const modal = document.getElementById('reflectionModal');
-            const reflectionText = document.getElementById('reflectionText');
-            
-            if (modal && reflectionText) {
-                reflectionText.textContent = reflection;
-                modal.style.display = 'flex';
-                document.body.style.overflow = 'hidden';
-            }
-        }
-
-        function hideReflectionModal() {
-            const modal = document.getElementById('reflectionModal');
-            if (modal) {
-                modal.style.display = 'none';
-                document.body.style.overflow = 'auto';
-            }
-        }
-
-        // Close modal when clicking outside
-        window.onclick = function(event) {
-            const modal = document.getElementById('reflectionModal');
-            if (event.target === modal) {
-                hideReflectionModal();
-            }
-        }
-
-        async function shareArtwork(id, description, filename) {
-            try {
-                const text = `Check out this AI-generated artwork by @IRISAISOLANA:\n\n${description}`;
-                const url = `${window.location.origin}/static/gallery/${filename}`;
-                const twitterUrl = `https://twitter.com/intent/tweet?text=${encodeURIComponent(text)}&url=${encodeURIComponent(url)}`;
-                
-                // Open Twitter intent in a new window
-                window.open(twitterUrl, '_blank', 'width=550,height=420');
-            } catch (error) {
-                console.error('Error sharing:', error);
-                showToast('Failed to share. Please try again.');
-            }
-        }
-
-        let currentSort = 'new';
-        let isLoading = false;
-        const votedImages = new Set(JSON.parse(localStorage.getItem('votedImages') || '[]'));
-        const container = document.getElementById('gallery-container');
-
-        function showLoading() {
-            if (!document.querySelector('.gallery-loading')) {
-                container.innerHTML = '<div class="gallery-loading">Loading gallery...</div>';
-            }
-        }
-
-        async function loadGallery(sort = 'new') {
-            if (isLoading) return;
-            
-            try {
-                isLoading = true;
-                showLoading();
-                
-                const response = await fetch(`/api/gallery?sort=${sort}`);
-                if (!response.ok) throw new Error('Failed to load gallery');
-                
-                const data = await response.json();
-                const items = data.items;
-                
-                if (!items.length) {
-                    container.innerHTML = '<p class="gallery-empty">No artworks yet. Check back soon!</p>';
-                    return;
-                }
-                
-                container.innerHTML = items.map(item => `
-                    <div class="gallery-item">
-                        <img src="/static/gallery/${item.filename}" alt="${item.description}" loading="lazy">
-                        <div class="item-details">
-                            <p class="description">${item.description}</p>
-                            <div class="item-meta">
-                                <span>${new Date(item.timestamp).toLocaleString()}</span>
-                                ${item.has_reflection ? `
-                                    <button class="reflection-button" onclick="showReflection('${item.id}', \`${item.reflection.replace(/`/g, '\\`')}\`)">
-                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                                            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/>
-                                        </svg>
-                                        View IRIS's Reflection
-                                    </button>
-                                ` : ''}
-                            </div>
-                            <div class="vote-section">
-                                <div class="vote-count">
-                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                                        <path d="M12 4l-8 8h6v8h4v-8h6z"/>
-                                    </svg>
-                                    <span>${item.votes || 0}</span>
-                                </div>
-                                <button class="vote-button ${votedImages.has(item.id) ? 'voted' : ''}" 
-                                        data-id="${item.id}" 
-                                        ${votedImages.has(item.id) ? 'disabled' : ''}>
-                                    ${votedImages.has(item.id) ? '✓ Voted' : '↑ Upvote'}
-                                </button>
-                                <button class="share-button" onclick="shareArtwork('${item.id}', '${item.description}', '${item.filename}')" title="Share on Twitter">
-                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                                        <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
-                                    </svg>
-                                    Share on Twitter
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-                `).join('');
-
-                // Add click handlers for vote buttons
-                container.querySelectorAll('.vote-button:not(.voted)').forEach(button => {
-                    button.addEventListener('click', () => handleVote(button));
-                });
-            } catch (error) {
-                console.error('Error loading gallery:', error);
-                container.innerHTML = '<p class="gallery-error">Error loading gallery. Please try again later.</p>';
-            } finally {
-                isLoading = false;
-            }
-        }
-
-        // Add WebSocket connection to receive real-time updates
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
-        
-        ws.onmessage = async (event) => {
-            const data = JSON.parse(event.data);
-            if (data.type === 'gallery_update' && data.action === 'new_item') {
-                await loadGallery(currentSort);
-            }
-        };
-
-        // Initialize gallery
-        loadGallery();
-
-        // Add sort button handlers
-        document.querySelectorAll('.sort-button').forEach(button => {
-            button.addEventListener('click', async () => {
-                const sort = button.dataset.sort;
-                if (sort === currentSort) return;
-                
-                document.querySelector('.sort-button.active').classList.remove('active');
-                button.classList.add('active');
-                
-                currentSort = sort;
-                await loadGallery(sort);
-            });
-        });
-
-        // Refresh gallery periodically (every 30 seconds)
-        setInterval(() => loadGallery(currentSort), 30000);
-
-        // Add real-time updates via WebSocket
-        const ws = new WebSocket(`${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`);
-        
-        ws.onmessage = async (event) => {
-            try {
-                const data = JSON.parse(event.data);
-                if (data.type === 'vote_update') {
-                    // Update vote count in UI without reloading
-                    const voteCount = document.querySelector(`[data-id="${data.image_id}"] .vote-count span`);
-                    if (voteCount) {
-                        voteCount.textContent = data.votes;
-                    }
-                    
-                    // If sorted by votes, reload gallery
-                    if (currentSort === 'votes') {
-                        await loadGallery('votes', false);
-                    }
-                } else if (data.type === 'gallery_update' && data.action === 'new_item') {
-                    // If viewing latest, reload to show new item
-                    if (currentSort === 'new') {
-                        await loadGallery('new', false);
-                    }
-                }
-            } catch (error) {
-                console.error('Error handling WebSocket message:', error);
-            }
-        };
-
-        // Improve error handling for votes
-        async function handleVote(button) {
-            if (button.disabled || button.classList.contains('voted')) return;
-            
-            const imageId = button.dataset.id;
-            button.disabled = true;
-            
-            try {
-                const response = await fetch(`/api/gallery/${imageId}/upvote`, {
-                    method: 'POST'
-                });
-                
-                if (!response.ok) {
-                    throw new Error('Failed to upvote');
-                }
-                
-                const data = await response.json();
-                
-                if (data.success) {
-                    // Update UI
-                    button.classList.add('voted');
-                    button.textContent = '✓ Voted';
-                    
-                    // Update vote count
-                    const voteCount = button.parentElement.querySelector('.vote-count span');
-                    if (voteCount) {
-                        voteCount.textContent = data.votes;
-                    }
-                    
-                    // Save voted state
-                    votedImages.add(imageId);
-                    localStorage.setItem('votedImages', JSON.stringify([...votedImages]));
-                    
-                    showToast('Vote recorded! Thank you for participating.');
-                    
-                    // If sorted by votes, reload gallery
-                    if (currentSort === 'votes') {
-                        await loadGallery('votes', false);
-                    }
-                }
-            } catch (error) {
-                console.error('Error voting:', error);
-                showToast('Failed to register vote. Please try again.');
-                button.disabled = false;
-            }
-        }
-
-        // Add loading state handling
-        function showLoading() {
-            container.innerHTML = `
-                <div class="gallery-loading">
-                    <svg class="loading-spinner" viewBox="0 0 50 50">
-                        <circle cx="25" cy="25" r="20" fill="none" stroke="currentColor" stroke-width="5"></circle>
-                    </svg>
-                    <span>Loading gallery...</span>
-                </div>
-            `;
-        }
-
-        // Add error state handling
-        function showError(message) {
-            container.innerHTML = `
-                <div class="gallery-error">
-                    <svg viewBox="0 0 24 24" fill="currentColor">
-                        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/>
-                    </svg>
-                    <span>${message}</span>
-                </div>
-            `;
-        }
-
-        // Add empty state handling
-        function showEmpty() {
-            container.innerHTML = `
-                <div class="gallery-empty">
-                    <svg viewBox="0 0 24 24" fill="currentColor">
-                        <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V5h14v14zm-5.04-6.71l-2.75 3.54-1.96-2.36L6.5 17h11l-3.54-4.71z"/>
-                    </svg>
-                    <span>No artworks yet. Check back soon!</span>
-                </div>
-            `;
-        }
     </script>
 </body>
 </html>

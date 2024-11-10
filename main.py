@@ -434,11 +434,7 @@ IMPORTANT:
             
             logger.info("🎉 Drawing completed successfully")
             
-            # After drawing is complete, ensure we have all required data
-            if not self.current_drawing:
-                logger.error("No current drawing data available")
-                return
-
+            # Update current drawing data
             self.current_drawing.update({
                 "description": instructions.get("description", ""),
                 "background": instructions.get("background", "#000000"),
@@ -456,13 +452,14 @@ IMPORTANT:
             # Add a small delay to ensure canvas data is received
             await asyncio.sleep(0.5)
 
-            # Update stats
+            # Notify frontend that a new gallery item is available
             await self.broadcast_state({
-                "type": "stats_update",
-                "total_creations": self.total_creations,
-                "total_pixels": self.total_pixels_drawn,
-                "viewers": len(self.viewers),
-                "generation_time": (datetime.now() - self.last_generation_time).seconds
+                "type": "gallery_update",
+                "action": "new_item",
+                "item": {
+                    "id": self.current_drawing["id"],
+                    "description": self.current_drawing["idea"]
+                }
             })
 
         except Exception as e:
@@ -556,6 +553,7 @@ Keep your reflection personal and introspective, as if sharing with a friend."""
                 
                 # Rest before next creation
                 logger.info("😌 IRIS rests before next creation...")
+                await self.update_status("resting", "waiting")
                 await asyncio.sleep(self.generation_interval)
                 
             except Exception as e:
@@ -751,66 +749,47 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
-    connection_id = f"ws_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
-    logger.info(f"New viewer connected: {connection_id}")
+    logger.info("New WebSocket connection established")
     
     try:
         # Add to viewers
         generator.viewers.add(websocket)
         
-        # Send immediate stats update
-        await generator.broadcast_state({
+        # Send initial state including current drawing state
+        initial_state = {
             "type": "display_update",
             "status": generator.current_status,
             "phase": generator.current_phase,
             "idea": generator.current_idea,
             "timestamp": datetime.now().isoformat(),
             "viewers": len(generator.viewers),
-            "is_running": generator.is_running
-        })
+            "is_running": generator.is_running,
+            "total_creations": generator.total_creations,
+            "total_pixels": generator.total_pixels_drawn
+        }
+
+        await websocket.send_json(initial_state)
+
+        # If there's a current drawing, send its state
+        if generator.current_state:
+            for cmd in generator.current_state:
+                await websocket.send_json(cmd)
         
-        # Keep connection alive and handle incoming messages
         while True:
-            try:
-                msg = await websocket.receive_json()
-                if msg.get('type') == 'canvas_data':
-                    logger.info(f"Received canvas data from {connection_id}")
-                    success = await generator.save_to_gallery(msg.get('data', ''))
-                    if success:
-                        logger.info("Successfully saved to gallery")
-                        # Notify all clients of new gallery item
-                        await generator.broadcast_state({
-                            "type": "gallery_update",
-                            "action": "new_item"
-                        })
-                    else:
-                        logger.error("Failed to save to gallery")
-                elif msg.get('type') == 'subscribe_status':
-                    await websocket.send_json({
-                        "type": "display_update",
-                        "status": generator.current_status,
-                        "phase": generator.current_phase,
-                        "idea": generator.current_idea,
-                        "timestamp": datetime.now().isoformat(),
-                        "viewers": len(generator.viewers),
-                        "is_running": generator.is_running
-                    })
-            except WebSocketDisconnect:
-                logger.info(f"Viewer disconnected: {connection_id}")
-                break
-            except Exception as e:
-                logger.error(f"Error handling message: {e}")
-                break
+            data = await websocket.receive_json()
+            logger.info(f"Received WebSocket message: {data}")
+            
+            if data.get("type") == "subscribe_status":
+                await websocket.send_json(initial_state)
                 
-    except Exception as e:
-        logger.error(f"Error in connection {connection_id}: {e}")
+    except WebSocketDisconnect:
+        logger.info("WebSocket disconnected")
     finally:
-        if websocket in generator.viewers:
-            generator.viewers.remove(websocket)
-            await generator.broadcast_state({
-                "type": "display_update",
-                "viewers": len(generator.viewers)
-            })
+        generator.viewers.remove(websocket)
+        await generator.broadcast_state({
+            "type": "display_update",
+            "viewers": len(generator.viewers)
+        })
 
 @app.get("/")
 async def home():
@@ -859,75 +838,35 @@ async def get_status():
 
 @app.get("/api/gallery")
 async def get_gallery(sort: str = "new", limit: int = 50, offset: int = 0):
-    """Get gallery items with sorting, pagination and error handling"""
     try:
         gallery_file = "data/gallery_data.json"
+        logger.info(f"Loading gallery from {gallery_file}")
+        
         if not os.path.exists(gallery_file):
             logger.warning("Gallery file not found, creating empty gallery")
             with open(gallery_file, "w") as f:
                 json.dump([], f)
-            return {"items": [], "total": 0, "page": 0}
+            return {"success": True, "items": []}
             
         with open(gallery_file, "r") as f:
             items = json.load(f)
-        
-        # Verify files exist and clean up data
-        valid_items = []
-        for item in items:
-            filepath = os.path.join("static/gallery", item["filename"])
-            if os.path.exists(filepath):
-                # Ensure all fields are properly formatted
-                try:
-                    cleaned_item = {
-                        "id": str(item["id"]),
-                        "filename": str(item["filename"]),
-                        "description": str(item.get("description", "")),
-                        "reflection": str(item.get("reflection", "")),
-                        "timestamp": str(item.get("timestamp", "")),
-                        "votes": int(item.get("votes", 0)),
-                        "has_reflection": bool(item.get("reflection")),
-                        "pixel_count": int(item.get("pixel_count", 0))
-                    }
-                    valid_items.append(cleaned_item)
-                except (ValueError, TypeError) as e:
-                    logger.error(f"Error cleaning gallery item: {e}")
-                    continue
-        
-        # Sort items
-        try:
+            logger.info(f"Loaded {len(items)} items from gallery")
+            
+            # Sort items
             if sort == "votes":
-                # Sort by votes (highest first), then by timestamp (newest first) for ties
-                valid_items.sort(key=lambda x: (-x["votes"], x["timestamp"]), reverse=True)
-            else:  # sort by new (default)
-                valid_items.sort(key=lambda x: x["timestamp"], reverse=True)
-        except Exception as sort_error:
-            logger.error(f"Error sorting gallery items: {sort_error}")
-            # Fallback to timestamp sort
-            valid_items.sort(key=lambda x: x["timestamp"], reverse=True)
-        
-        # Apply pagination
-        total_items = len(valid_items)
-        start_idx = min(offset, total_items)
-        end_idx = min(offset + limit, total_items)
-        paginated_items = valid_items[start_idx:end_idx]
-        
-        # Save cleaned data back to file
-        try:
-            with open(gallery_file, "w") as f:
-                json.dump(valid_items, f, indent=2)
-        except Exception as save_error:
-            logger.error(f"Error saving cleaned gallery data: {save_error}")
-        
-        return {
-            "items": paginated_items,
-            "total": total_items,
-            "page": offset // limit + 1 if limit > 0 else 1,
-            "has_more": end_idx < total_items
-        }
+                items.sort(key=lambda x: x.get("votes", 0), reverse=True)
+            else:  # sort by new
+                items.sort(key=lambda x: x["timestamp"], reverse=True)
+            
+            # Add success flag to match frontend expectations
+            return {
+                "success": True,
+                "items": items
+            }
         
     except Exception as e:
         logger.error(f"Error loading gallery: {e}")
-        raise HTTPException(status_code=500, detail="Error loading gallery")
+        return {"success": False, "error": str(e)}
 
 @app.get("/static/gallery/{filename}")
 async def get_gallery_image(filename: str):
