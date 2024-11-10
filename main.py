@@ -4,7 +4,7 @@ from fastapi.staticfiles import StaticFiles
 from anthropic import Anthropic
 import json
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Any, List, Set
 import logging
 import os
@@ -32,6 +32,16 @@ import uuid
 import os
 import time
 from pathlib import Path
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+import aiohttp
+import MySQLdb
+from contextlib import contextmanager
+import urllib.request
+import certifi
+import socket
+import psutil
 
 # Setup logging with minimal WebSocket logs
 logging.basicConfig(
@@ -131,6 +141,36 @@ class FileLock:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.release()
 
+class CircuitBreaker:
+    def __init__(self, failure_threshold=5, reset_timeout=60):
+        self.failure_count = 0
+        self.failure_threshold = failure_threshold
+        self.reset_timeout = reset_timeout
+        self.last_failure_time = 0
+        self.state = "closed"  # closed, open, half-open
+
+    async def call(self, func, *args, **kwargs):
+        current_time = time.time()
+
+        if self.state == "open":
+            if current_time - self.last_failure_time > self.reset_timeout:
+                self.state = "half-open"
+            else:
+                raise Exception("Circuit breaker is open")
+
+        try:
+            result = await func(*args, **kwargs)
+            if self.state == "half-open":
+                self.state = "closed"
+                self.failure_count = 0
+            return result
+        except Exception as e:
+            self.failure_count += 1
+            self.last_failure_time = current_time
+            if self.failure_count >= self.failure_threshold:
+                self.state = "open"
+            raise e
+
 class ArtGenerator:
     def __init__(self):
         self.viewers: Set[WebSocket] = set()
@@ -158,6 +198,10 @@ class ArtGenerator:
         self.min_generation_interval = 120  # Match generation interval
         self.max_retries = 3  # Add retry count
         self.retry_delay = 10  # Seconds between retries
+        self.api_breaker = CircuitBreaker()
+
+        # Initialize last_generation_time from database
+        self.last_generation_time = asyncio.run(db_service.get_last_generation_time())
 
     def _load_initial_stats(self):
         """Synchronously initialize statistics from gallery"""
@@ -178,6 +222,10 @@ class ArtGenerator:
             logger.error(f"Error initializing stats: {e}")
 
     async def get_art_idea(self) -> str:
+        """Generate art idea using Claude"""
+        return await self.api_breaker.call(self._get_art_idea)
+
+    async def _get_art_idea(self) -> str:
         """Generate art idea using Claude"""
         retries = 0
         while retries < self.max_retries:
@@ -561,8 +609,10 @@ IMPORTANT:
         
         while self.is_running:
             try:
-                # Try to acquire lock before starting new generation
                 async with self.generation_lock:
+                    # Get latest time from database
+                    self.last_generation_time = await db_service.get_last_generation_time()
+                    
                     # Check if enough time has passed
                     time_since_last = (datetime.now() - self.last_generation_time).total_seconds()
                     if time_since_last < self.min_generation_interval:
@@ -648,6 +698,10 @@ IMPORTANT:
                     logger.info("😌 IRIS rests before next creation...")
                     await self.update_status("resting", "waiting")
                     
+                    # Update last generation time in database after successful generation
+                    self.last_generation_time = datetime.now()
+                    await db_service.update_last_generation_time(self.last_generation_time)
+
             except Exception as e:
                 logger.error(f"❌ Error in creative process: {e}")
                 await self.update_status("error", "error")
@@ -655,49 +709,21 @@ IMPORTANT:
                 continue
 
     async def save_to_gallery(self, canvas_data: str):
-        """Save drawing to gallery using Cloudinary"""
+        """Save drawing to gallery using Cloudinary and PlanetScale"""
         try:
-            if not self.current_drawing:
-                logger.error("No current drawing to save")
-                return False
+            # Use generation lock to ensure only one save at a time
+            async with self.generation_lock:
+                if not self.current_drawing:
+                    logger.error("No current drawing to save")
+                    return False
 
-            # Wait briefly for reflection if it's not ready
-            if not self.current_reflection:
-                logger.info("Waiting for reflection to be ready...")
-                await asyncio.sleep(2)  # Give reflection a moment to complete
-
-            # Use file lock to prevent concurrent saves
-            with self.file_lock:
-                # Process canvas data and upload
-                logger.info("Processing canvas data for upload...")
-                img_data = canvas_data.split(',')[1]
-                img_bytes = base64.b64decode(img_data)
-                
                 # Generate unique ID
                 unique_id = datetime.now().strftime("%Y%m%d_%H%M%S")
                 
-                # Load existing gallery data first to check for duplicates
-                gallery_file = "data/gallery_data.json"
-                try:
-                    with open(gallery_file, "r") as f:
-                        items = json.load(f)
-                        
-                    # Check for recent duplicates (within last 5 minutes)
-                    current_time = datetime.now()
-                    for item in items:
-                        try:
-                            item_time = datetime.fromisoformat(item["timestamp"])
-                            if (current_time - item_time).total_seconds() < 300:  # 5 minutes
-                                logger.warning("Found recent item, skipping to prevent duplicate")
-                                return False
-                        except (ValueError, KeyError):
-                            continue
-                    
-                except (FileNotFoundError, json.JSONDecodeError):
-                    items = []
-                
                 # Upload to Cloudinary
                 logger.info("Uploading to Cloudinary...")
+                img_data = canvas_data.split(',')[1]
+                img_bytes = base64.b64decode(img_data)
                 upload_result = upload(
                     img_bytes,
                     folder="iris_gallery",
@@ -720,17 +746,28 @@ IMPORTANT:
                     "votes": 0,
                     "pixel_count": self.current_drawing.get("pixel_count", 0)
                 }
-                
-                logger.info(f"Saving entry with reflection: {new_entry['reflection']}")
-                
-                # Add to beginning of gallery
-                items.insert(0, new_entry)
-                
-                # Save updated gallery
-                with open(gallery_file, "w") as f:
-                    json.dump(items, f, indent=2)
-                    
+
+                # Save to database
+                with db_service.get_connection() as conn:
+                    with conn.cursor() as cursor:
+                        cursor.execute("""
+                            INSERT INTO gallery 
+                            (id, url, description, reflection, timestamp, votes, pixel_count)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        """, (
+                            new_entry["id"],
+                            new_entry["url"],
+                            new_entry["description"],
+                            new_entry["reflection"],
+                            new_entry["timestamp"],
+                            new_entry["votes"],
+                            new_entry["pixel_count"]
+                        ))
+
                 logger.info(f"Successfully saved artwork {unique_id} to gallery")
+                
+                # Update last generation time
+                self.last_generation_time = datetime.now()
                 
                 # Broadcast update
                 await self.broadcast_state({
@@ -743,7 +780,6 @@ IMPORTANT:
                     
         except Exception as e:
             logger.error(f"Error in save_to_gallery: {e}")
-            logger.error(f"Full error: {e}", exc_info=True)
             return False
 
     def _calculate_circle_points(self, center_x: float, center_y: float, radius: float, points: int = 32) -> List[List[float]]:
@@ -851,7 +887,103 @@ async def migrate_gallery_data():
     except Exception as e:
         logger.error(f"Error migrating gallery data: {e}")
 
-# Create the generator before the lifespan
+# Add this class near the top after imports
+class DatabaseService:
+    def __init__(self):
+        logger.info("Initializing PlanetScale database service...")
+        if os.name == 'nt':  # Windows
+            import certifi
+            ssl_cert = certifi.where()
+            self.config = {
+                "host": os.getenv("DATABASE_HOST"),
+                "user": os.getenv("DATABASE_USERNAME"),
+                "passwd": os.getenv("DATABASE_PASSWORD"),
+                "db": os.getenv("DATABASE"),
+                "autocommit": True,
+                "ssl": {
+                    "ca": ssl_cert,
+                    "verify_mode": "VERIFY_IDENTITY"
+                }
+            }
+        else:  # Linux/Unix
+            self.config = {
+                "host": os.getenv("DATABASE_HOST"),
+                "user": os.getenv("DATABASE_USERNAME"),
+                "passwd": os.getenv("DATABASE_PASSWORD"),
+                "db": os.getenv("DATABASE"),
+                "autocommit": True,
+                "ssl_mode": "VERIFY_IDENTITY",
+                "ssl": {"ca": "/etc/ssl/certs/ca-certificates.crt"}
+            }
+        self._initialize_database()
+
+    def _initialize_database(self):
+        """Initialize database tables"""
+        with self.get_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS gallery (
+                        id VARCHAR(255) PRIMARY KEY,
+                        url TEXT NOT NULL,
+                        description TEXT,
+                        reflection TEXT,
+                        timestamp DATETIME NOT NULL,
+                        votes INT DEFAULT 0,
+                        pixel_count INT DEFAULT 0
+                    )
+                """)
+                
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS system_state (
+                        state_key VARCHAR(255) PRIMARY KEY,
+                        state_value TEXT NOT NULL,
+                        updated_at DATETIME NOT NULL
+                    )
+                """)
+                logger.info("Database tables initialized successfully")
+
+    @contextmanager
+    def get_connection(self):
+        """Get database connection context"""
+        conn = MySQLdb.connect(**self.config)
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    async def get_last_generation_time(self):
+        """Get last generation time from database"""
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        SELECT state_value FROM system_state 
+                        WHERE state_key = 'last_generation_time'
+                    """)
+                    result = cursor.fetchone()
+                    if result:
+                        return datetime.fromisoformat(result[0])
+                    return datetime.now() - timedelta(minutes=5)
+        except Exception as e:
+            logger.error(f"Error getting last generation time: {e}")
+            return datetime.now() - timedelta(minutes=5)
+
+    async def update_last_generation_time(self, timestamp):
+        """Update last generation time in database"""
+        with self.get_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    INSERT INTO system_state (state_key, state_value, updated_at)
+                    VALUES ('last_generation_time', %s, NOW())
+                    ON DUPLICATE KEY UPDATE 
+                    state_value = VALUES(state_value),
+                    updated_at = NOW()
+                """, (timestamp.isoformat(),))
+
+# Then create the service instance
+db_service = DatabaseService()
+
+# Then create the generator
 generator = ArtGenerator()
 
 # Then define the lifespan
@@ -859,7 +991,7 @@ generator = ArtGenerator()
 async def lifespan(app: FastAPI):
     try:
         logger.info("Initializing IRIS...")
-        await migrate_gallery_data()  # Add this line
+        await generator.initialize()  # Initialize async components
         asyncio.create_task(generator.start())
         logger.info("IRIS initialized successfully")
         yield
@@ -873,6 +1005,45 @@ async def lifespan(app: FastAPI):
 # Finally create the FastAPI app with lifespan
 app = FastAPI(lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# Add rate limiting middleware
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app, max_requests: int = 100, window_seconds: int = 60):
+        super().__init__(app)
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self.requests = {}
+
+    async def dispatch(self, request, call_next):
+        client_ip = request.client.host
+        now = time.time()
+        
+        # Clean old requests
+        self.requests = {ip: reqs for ip, reqs in self.requests.items() 
+                        if now - reqs["timestamp"] < self.window_seconds}
+        
+        if client_ip in self.requests:
+            if self.requests[client_ip]["count"] >= self.max_requests:
+                return JSONResponse(
+                    status_code=429,
+                    content={"error": "Too many requests"}
+                )
+            self.requests[client_ip]["count"] += 1
+        else:
+            self.requests[client_ip] = {"count": 1, "timestamp": now}
+        
+        response = await call_next(request)
+        return response
+
+# Add middleware to app
+app.add_middleware(RateLimitMiddleware)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -996,48 +1167,18 @@ async def get_status():
         "is_running": generator.is_running
     }
 
+# Update the gallery endpoints to use the database service
 @app.get("/api/gallery")
 async def get_gallery(sort: str = "new", limit: int = 50, offset: int = 0):
     try:
-        gallery_file = "data/gallery_data.json"
-        logger.info(f"Loading gallery from {gallery_file}")
-        
-        if not os.path.exists(gallery_file):
-            logger.warning(f"Gallery file not found at {os.path.abspath(gallery_file)}")
-            with open(gallery_file, "w") as f:
-                json.dump([], f)
-            return {"success": True, "items": []}
-            
-        with open(gallery_file, "r") as f:
-            items = json.load(f)
-            logger.info(f"Loaded {len(items)} items from gallery")
-            
-            # Remove any duplicates by ID
-            seen_ids = set()
-            unique_items = []
-            for item in items:
-                if item["id"] not in seen_ids:
-                    seen_ids.add(item["id"])
-                    unique_items.append(item)
-            
-            # Sort items
-            if sort == "votes":
-                unique_items.sort(key=lambda x: x.get("votes", 0), reverse=True)
-            else:  # sort by new
-                unique_items.sort(key=lambda x: x["timestamp"], reverse=True)
-            
-            # Apply limit and offset
-            paginated_items = unique_items[offset:offset + limit]
-            
-            return {
-                "success": True,
-                "items": paginated_items,
-                "total": len(unique_items)
-            }
-        
+        items = await db_service.get_gallery_items(sort, limit, offset)
+        return {
+            "success": True,
+            "items": items,
+            "total": len(items)
+        }
     except Exception as e:
-        logger.error(f"Error loading gallery: {e}")
-        logger.error(f"Full error: {e}", exc_info=True)
+        logger.error(f"Error in get_gallery: {e}")
         return {"success": False, "error": str(e)}
 
 @app.get("/static/gallery/{filename}")
@@ -1332,10 +1473,117 @@ async def download_gallery():
         logger.error(f"Error downloading gallery: {e}")
         raise HTTPException(status_code=500, detail="Error downloading gallery")
 
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    try:
+        # Check database
+        with db_service.get_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT 1")
+
+        # Check Cloudinary
+        cloudinary.api.ping()
+
+        # Check Anthropic
+        test_message = await generator.client.messages.create(
+            model="claude-3-sonnet-20240229",
+            max_tokens=10,
+            messages=[{"role": "user", "content": "test"}]
+        )
+
+        return {
+            "status": "healthy",
+            "database": "connected",
+            "cloudinary": "connected",
+            "anthropic": "connected",
+            "uptime": time.time() - startup_time,
+            "memory_usage": psutil.Process().memory_info().rss / 1024 / 1024  # MB
+        }
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "unhealthy",
+                "error": str(e)
+            }
+        )
+
+class RequestTracer(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        request_id = str(uuid.uuid4())
+        start_time = time.time()
+        
+        logger.info(f"Request {request_id} started: {request.method} {request.url}")
+        
+        try:
+            response = await call_next(request)
+            duration = time.time() - start_time
+            logger.info(f"Request {request_id} completed in {duration:.2f}s")
+            response.headers["X-Request-ID"] = request_id
+            return response
+        except Exception as e:
+            logger.error(f"Request {request_id} failed: {e}")
+            raise
+
+app.add_middleware(RequestTracer)
+
+async def shutdown_event():
+    """Graceful shutdown"""
+    logger.info("Shutting down...")
+    
+    # Stop art generation
+    generator.is_running = False
+    
+    # Close all WebSocket connections
+    for viewer in generator.viewers:
+        try:
+            await viewer.close()
+        except:
+            pass
+    
+    # Close database connections
+    for conn in db_service.pool:
+        try:
+            conn.close()
+        except:
+            pass
+    
+    logger.info("Shutdown complete")
+
+app.add_event_handler("shutdown", shutdown_event)
+
 if __name__ == "__main__":
     import uvicorn
-    print(f"\n=== {AI_NAME} Drawing System v2.0 ===")
-    print(f"{AI_TAGLINE}")
-    print("Open http://localhost:8000 in your browser")
-    print("================================\n")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    import socket
+
+    def find_available_port(start_port=8000, max_tries=10):
+        """Find an available port starting from start_port"""
+        for port in range(start_port, start_port + max_tries):
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.bind(('0.0.0.0', port))
+                    return port
+            except OSError:
+                continue
+        raise RuntimeError(f"No available ports in range {start_port}-{start_port + max_tries}")
+
+    try:
+        port = find_available_port()
+        print(f"\n=== {AI_NAME} Drawing System v2.0 ===")
+        print(f"{AI_TAGLINE}")
+        print(f"Starting server on port {port}")
+        print("================================\n")
+        
+        config = uvicorn.Config(
+            app=app,
+            host="0.0.0.0",
+            port=port,
+            log_level="error",
+            access_log=False
+        )
+        server = uvicorn.Server(config)
+        server.run()
+    except Exception as e:
+        print(f"Failed to start server: {e}")

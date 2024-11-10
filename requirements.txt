@@ -13,7 +13,10 @@ pydantic
 sniffio
 typing-extensions
 cloudinary==1.41.0
-certifi
+certifi>=2024.2.2
 six
 urllib3
 requests==2.31.0
+aiohttp==3.9.1
+mysqlclient==2.2.1
+psutil==5.9.8
