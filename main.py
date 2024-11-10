@@ -74,6 +74,9 @@ class ArtGenerator:
         # Initialize stats from gallery
         self._load_initial_stats()
 
+        # Add lock
+        self.generation_lock = asyncio.Lock()
+
     def _load_initial_stats(self):
         """Synchronously initialize statistics from gallery"""
         try:
@@ -525,60 +528,80 @@ Keep your reflection personal and introspective, as if sharing with a friend."""
         
         while self.is_running:
             try:
-                # Ideation phase
-                logger.info("🤔 IRIS contemplates new possibilities...")
-                await self.update_status("thinking", "ideation")
-                idea = await self.get_art_idea()
-                
-                if idea:
-                    # Generation phase
-                    logger.info("✨ Inspiration strikes!")
-                    await self.update_status("drawing", "generation", idea)
-                    instructions = await self.get_drawing_instructions(idea)
+                # Try to acquire lock before starting new generation
+                async with self.generation_lock:
+                    # Check if enough time has passed since last generation
+                    time_since_last = (datetime.now() - self.last_generation_time).total_seconds()
+                    if time_since_last < self.generation_interval:
+                        logger.info(f"Waiting {self.generation_interval - time_since_last}s before next creation...")
+                        await asyncio.sleep(self.generation_interval - time_since_last)
+                        continue
+
+                    # Ideation phase
+                    logger.info("🤔 IRIS contemplates new possibilities...")
+                    await self.update_status("thinking", "ideation")
+                    idea = await self.get_art_idea()
                     
-                    if instructions:
-                        # Creation phase
-                        logger.info("🎨 Bringing vision to life...")
-                        self.total_creations += 1
-                        self.current_drawing = {
-                            "id": datetime.now().strftime("%Y%m%d_%H%M%S"),
-                            "idea": idea,
-                            "instructions": instructions,
-                            "timestamp": datetime.now().isoformat()
-                        }
-                        await self.execute_drawing(instructions)
+                    if idea:
+                        # Update last generation time before starting
+                        self.last_generation_time = datetime.now()
                         
-                        # Reflection phase
-                        logger.info("💭 IRIS contemplates the creation...")
-                        await self.update_status("reflecting", "reflection", idea)
-                        reflection = await self.reflect_on_creation(idea)
-                        self.current_reflection = reflection
+                        # Generation phase
+                        logger.info("✨ Inspiration strikes!")
+                        await self.update_status("drawing", "generation", idea)
+                        instructions = await self.get_drawing_instructions(idea)
                         
-                        # Request canvas data AFTER reflection is ready
-                        logger.info("📸 Requesting canvas data for gallery...")
-                        await self.broadcast_state({
-                            "type": "request_canvas_data",
-                            "drawing_id": self.current_drawing["id"]
-                        })
-                        
-                        # Add a small delay to ensure canvas data is received
-                        await asyncio.sleep(1)
-                        
-                        # Share reflection with viewers
-                        await self.broadcast_state({
-                            "type": "reflection_update",
-                            "reflection": reflection,
-                            "total_creations": self.total_creations
-                        })
-                        
-                        logger.info("✅ Creative cycle complete")
-                        await self.update_status("completed", "display", idea)
-                
-                # Rest before next creation
-                logger.info("😌 IRIS rests before next creation...")
-                await self.update_status("resting", "waiting")
-                await asyncio.sleep(self.generation_interval)
-                
+                        if instructions:
+                            # Creation phase
+                            logger.info("🎨 Bringing vision to life...")
+                            self.total_creations += 1
+                            new_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+                            
+                            # Check if ID already exists in gallery
+                            gallery_file = "data/gallery_data.json"
+                            if os.path.exists(gallery_file):
+                                with open(gallery_file, "r") as f:
+                                    existing_items = json.load(f)
+                                    if any(item["id"] == new_id for item in existing_items):
+                                        logger.warning(f"ID {new_id} already exists, skipping creation")
+                                        continue
+                            
+                            self.current_drawing = {
+                                "id": new_id,
+                                "idea": idea,
+                                "instructions": instructions,
+                                "timestamp": datetime.now().isoformat()
+                            }
+                            await self.execute_drawing(instructions)
+                            
+                            # Reflection phase
+                            logger.info("💭 IRIS contemplates the creation...")
+                            await self.update_status("reflecting", "reflection", idea)
+                            reflection = await self.reflect_on_creation(idea)
+                            self.current_reflection = reflection
+                            
+                            # Request canvas data AFTER reflection is ready
+                            logger.info("📸 Requesting canvas data for gallery...")
+                            await self.broadcast_state({
+                                "type": "request_canvas_data",
+                                "drawing_id": self.current_drawing["id"]
+                            })
+                            
+                            await asyncio.sleep(1)
+                            
+                            await self.broadcast_state({
+                                "type": "reflection_update",
+                                "reflection": reflection,
+                                "total_creations": self.total_creations
+                            })
+                            
+                            logger.info("✅ Creative cycle complete")
+                            await self.update_status("completed", "display", idea)
+                    
+                    # Rest before next creation
+                    logger.info("😌 IRIS rests before next creation...")
+                    await self.update_status("resting", "waiting")
+                    
             except Exception as e:
                 logger.error(f"❌ Error in creative process: {e}")
                 await self.update_status("error", "error")
