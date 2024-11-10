@@ -1,0 +1,22 @@
+# Logs
+logs/
+*.log
+
+# Data
+data/
+static/gallery/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# System
+.DS_Store
+Thumbs.db 
