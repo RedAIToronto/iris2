@@ -683,65 +683,82 @@ Keep your reflection personal and introspective, as if sharing with a friend."""
                 logger.error("No current drawing to save")
                 return False
 
-            # Process canvas data and upload
-            logger.info("Processing canvas data for upload...")
-            img_data = canvas_data.split(',')[1]
-            img_bytes = base64.b64decode(img_data)
-            
-            # Generate unique ID
-            unique_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-            
-            # Upload to Cloudinary
-            logger.info("Uploading to Cloudinary...")
-            upload_result = upload(
-                img_bytes,
-                folder="iris_gallery",
-                public_id=f"drawing_{unique_id}",
-                resource_type="image"
-            )
-            
-            image_url = upload_result.get('secure_url')
-            if not image_url:
-                logger.error("No URL in upload result")
-                return False
+            # Use file lock to prevent concurrent saves
+            with self.file_lock:
+                # Process canvas data and upload
+                logger.info("Processing canvas data for upload...")
+                img_data = canvas_data.split(',')[1]
+                img_bytes = base64.b64decode(img_data)
                 
-            # Create new entry
-            new_entry = {
-                "id": unique_id,
-                "url": image_url,
-                "description": self.current_drawing.get("idea", "Geometric pattern"),
-                "reflection": self.current_reflection or "",
-                "timestamp": datetime.now().isoformat(),
-                "votes": 0,
-                "pixel_count": self.current_drawing.get("pixel_count", 0)
-            }
-            
-            # Save to gallery file
-            gallery_file = "data/gallery_data.json"
-            try:
-                with open(gallery_file, "r") as f:
-                    items = json.load(f)
-            except (FileNotFoundError, json.JSONDecodeError):
-                items = []
+                # Generate unique ID
+                unique_id = datetime.now().strftime("%Y%m%d_%H%M%S")
                 
-            items.insert(0, new_entry)
-            
-            with open(gallery_file, "w") as f:
-                json.dump(items, f, indent=2)
+                # Load existing gallery data first to check for duplicates
+                gallery_file = "data/gallery_data.json"
+                try:
+                    with open(gallery_file, "r") as f:
+                        items = json.load(f)
+                        
+                    # Check for recent duplicates (within last 5 minutes)
+                    current_time = datetime.now()
+                    for item in items:
+                        try:
+                            item_time = datetime.fromisoformat(item["timestamp"])
+                            if (current_time - item_time).total_seconds() < 300:  # 5 minutes
+                                logger.warning("Found recent item, skipping to prevent duplicate")
+                                return False
+                        except (ValueError, KeyError):
+                            continue
+                    
+                except (FileNotFoundError, json.JSONDecodeError):
+                    items = []
                 
-            logger.info(f"Successfully saved artwork {unique_id} to gallery")
-            
-            # Broadcast update
-            await self.broadcast_state({
-                "type": "gallery_update",
-                "action": "new_item",
-                "item": new_entry
-            })
-            
-            return True
+                # Upload to Cloudinary
+                logger.info("Uploading to Cloudinary...")
+                upload_result = upload(
+                    img_bytes,
+                    folder="iris_gallery",
+                    public_id=f"drawing_{unique_id}",
+                    resource_type="image"
+                )
                 
+                image_url = upload_result.get('secure_url')
+                if not image_url:
+                    logger.error("No URL in upload result")
+                    return False
+                    
+                # Create new entry
+                new_entry = {
+                    "id": unique_id,
+                    "url": image_url,
+                    "description": self.current_drawing.get("idea", "Geometric pattern"),
+                    "reflection": self.current_reflection or "",
+                    "timestamp": datetime.now().isoformat(),
+                    "votes": 0,
+                    "pixel_count": self.current_drawing.get("pixel_count", 0)
+                }
+                
+                # Add to beginning of gallery
+                items.insert(0, new_entry)
+                
+                # Save updated gallery
+                with open(gallery_file, "w") as f:
+                    json.dump(items, f, indent=2)
+                    
+                logger.info(f"Successfully saved artwork {unique_id} to gallery")
+                
+                # Broadcast update
+                await self.broadcast_state({
+                    "type": "gallery_update",
+                    "action": "new_item",
+                    "item": new_entry
+                })
+                
+                return True
+                    
         except Exception as e:
             logger.error(f"Error in save_to_gallery: {e}")
+            logger.error(f"Full error: {e}", exc_info=True)
             return False
 
     def _calculate_circle_points(self, center_x: float, center_y: float, radius: float, points: int = 32) -> List[List[float]]:
@@ -914,7 +931,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 success = await generator.save_to_gallery(data.get("data", ""))
                 if success:
                     logger.info("Successfully saved to gallery")
-                    # Send confirmation back to client
                     await websocket.send_json({
                         "type": "save_success",
                         "message": "Artwork saved to gallery"
@@ -931,11 +947,23 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
     finally:
-        generator.viewers.remove(websocket)
-        await generator.broadcast_state({
-            "type": "display_update",
-            "viewers": len(generator.viewers)
-        })
+        # Safely remove from viewers set
+        try:
+            if websocket in generator.viewers:
+                generator.viewers.remove(websocket)
+                logger.info(f"Removed viewer. Active viewers: {len(generator.viewers)}")
+        except Exception as e:
+            logger.error(f"Error removing viewer: {e}")
+        
+        # Broadcast viewer count update only if there are still viewers
+        if generator.viewers:
+            try:
+                await generator.broadcast_state({
+                    "type": "display_update",
+                    "viewers": len(generator.viewers)
+                })
+            except Exception as e:
+                logger.error(f"Error broadcasting viewer count update: {e}")
 
 @app.get("/")
 async def home():
