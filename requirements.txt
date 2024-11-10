@@ -12,4 +12,7 @@ jiter
 pydantic
 sniffio
 typing-extensions
-cloudinary==1.36.0
+cloudinary==1.41.0
+certifi
+six
+urllib3
