@@ -1509,7 +1509,11 @@ async def health_check():
             "cloudinary": "connected",
             "anthropic": "connected",
             "uptime": time.time() - startup_time,
-            "memory_usage": psutil.Process().memory_info().rss / 1024 / 1024  # MB
+            "memory_usage": psutil.Process().memory_info().rss / 1024 / 1024,  # MB
+            "host": socket.gethostname(),
+            "last_generation": generator.last_generation_time.isoformat(),
+            "active_viewers": len(generator.viewers),
+            "total_creations": generator.total_creations
         }
     except Exception as e:
         logger.error(f"Health check failed: {e}")
