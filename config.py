@@ -112,6 +112,9 @@ DRAWING_SCHEMA = {
         "additionalProperties": False
     }
 }
+
+
+# Keep existing HTML_TEMPLATE and GALLERY_TEMPLATE
 GALLERY_TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -376,6 +379,87 @@ GALLERY_TEMPLATE = """
                 font-size: 2em;
             }
         }
+
+        .nav-right {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .connect-wallet-btn {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: transparent;
+            border: 1px solid var(--primary-dim);
+            color: var(--primary-dim);
+            padding: 8px 16px;
+            border-radius: 20px;
+            cursor: not-allowed;
+            transition: all 0.3s ease;
+            font-family: 'Courier New', monospace;
+            position: relative;
+        }
+
+        .connect-wallet-btn:hover {
+            border-color: var(--primary);
+            color: var(--primary);
+        }
+
+        .connect-wallet-btn:hover::after {
+            content: attr(title);
+            position: absolute;
+            bottom: -40px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 17, 0, 0.9);
+            color: var(--primary);
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 0.8em;
+            white-space: nowrap;
+            border: 1px solid var(--primary);
+            z-index: 1000;
+        }
+
+        .connect-wallet-btn svg {
+            opacity: 0.5;
+        }
+
+        .connect-wallet-btn:hover svg {
+            opacity: 1;
+        }
+
+        .artwork-link {
+            display: block;
+            text-decoration: none;
+            color: inherit;
+            transition: all 0.3s ease;
+        }
+
+        .artwork-link:hover {
+            transform: scale(1.02);
+        }
+
+        .artwork-title {
+            text-decoration: none;
+            color: inherit;
+            transition: color 0.3s ease;
+        }
+
+        .artwork-title:hover {
+            color: var(--primary);
+        }
+
+        .gallery-item {
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .gallery-item:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 5px 20px rgba(0, 255, 0, 0.2);
+        }
     </style>
 </head>
 <body>
@@ -388,12 +472,22 @@ GALLERY_TEMPLATE = """
                 Back to Generator
             </a>
         </div>
-        <a href="https://x.com/IRISAISOLANA" target="_blank" class="twitter-link">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
-            </svg>
-            Follow @IRISAISOLANA
-        </a>
+        <div class="nav-right">
+            <button class="connect-wallet-btn" disabled title="Coming soon: Connect wallet to bid on NFTs with $IRIS">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M21 18v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v1"/>
+                    <polyline points="15 10 20 10 20 14 15 14"/>
+                    <path d="M20 12H9"/>
+                </svg>
+                Connect Wallet
+            </button>
+            <a href="https://x.com/IRISAISOLANA" target="_blank" class="twitter-link">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
+                </svg>
+                Follow @IRISAISOLANA
+            </a>
+        </div>
     </div>
 
     <div class="gallery-header">
@@ -423,6 +517,82 @@ GALLERY_TEMPLATE = """
             setTimeout(() => toast.classList.remove('show'), duration);
         }
 
+        // Add showReflection function
+        function showReflection(id, reflection) {
+            // Create modal if it doesn't exist
+            let modal = document.getElementById('reflection-modal');
+            if (!modal) {
+                modal = document.createElement('div');
+                modal.id = 'reflection-modal';
+                modal.style.cssText = `
+                    position: fixed;
+                    top: 0;
+                    left: 0;
+                    width: 100%;
+                    height: 100%;
+                    background: rgba(0, 0, 0, 0.9);
+                    display: flex;
+                    justify-content: center;
+                    align-items: center;
+                    z-index: 1000;
+                    backdrop-filter: blur(5px);
+                `;
+                
+                const content = document.createElement('div');
+                content.style.cssText = `
+                    background: var(--bg-darker);
+                    border: 1px solid var(--primary);
+                    border-radius: 15px;
+                    padding: 30px;
+                    max-width: 800px;
+                    width: 90%;
+                    max-height: 90vh;
+                    overflow-y: auto;
+                    position: relative;
+                `;
+                
+                const closeBtn = document.createElement('button');
+                closeBtn.innerHTML = '×';
+                closeBtn.style.cssText = `
+                    position: absolute;
+                    top: 10px;
+                    right: 10px;
+                    background: none;
+                    border: none;
+                    color: var(--primary);
+                    font-size: 24px;
+                    cursor: pointer;
+                    padding: 5px 10px;
+                `;
+                closeBtn.onclick = () => modal.remove();
+                
+                const title = document.createElement('h2');
+                title.textContent = "IRIS's Reflection";
+                title.style.cssText = `
+                    color: var(--primary);
+                    margin-bottom: 20px;
+                `;
+                
+                const text = document.createElement('div');
+                text.className = 'reflection-text';
+                
+                content.appendChild(closeBtn);
+                content.appendChild(title);
+                content.appendChild(text);
+                modal.appendChild(content);
+                document.body.appendChild(modal);
+            }
+            
+            // Update reflection text
+            const textElement = modal.querySelector('.reflection-text');
+            textElement.textContent = reflection;
+            
+            // Close modal when clicking outside
+            modal.onclick = (e) => {
+                if (e.target === modal) modal.remove();
+            };
+        }
+
         async function loadGallery(sort = 'new') {
             try {
                 console.log('Loading gallery...');
@@ -441,23 +611,26 @@ GALLERY_TEMPLATE = """
                 container.innerHTML = data.items.map(item => {
                     console.log('Processing gallery item:', item);
                     
-                    // Handle both old and new formats
                     const imageUrl = item.url || (item.filename ? `/static/gallery/${item.filename}` : null);
                     
                     if (!imageUrl) {
-                        console.error('Missing URL/filename for item:', item);
+                        console.error('Missing URL for item:', item);
                         return '';
                     }
                     
                     return `
                         <div class="gallery-item" data-id="${item.id}">
-                            <img src="${imageUrl}" 
-                                 alt="${item.description || 'Geometric pattern'}" 
-                                 loading="lazy"
-                                 onerror="console.error('Failed to load image:', '${imageUrl}')"
-                            />
+                            <a href="/artwork/${item.id}" class="artwork-link">
+                                <img src="${imageUrl}" 
+                                     alt="${item.description || 'Geometric pattern'}" 
+                                     loading="lazy"
+                                     onerror="console.error('Failed to load image:', '${imageUrl}')"
+                                />
+                            </a>
                             <div class="item-details">
-                                <p class="description">${item.description || 'Geometric pattern'}</p>
+                                <a href="/artwork/${item.id}" class="artwork-title">
+                                    <p class="description">${item.description || 'Geometric pattern'}</p>
+                                </a>
                                 <div class="item-meta">
                                     <span>${new Date(item.timestamp).toLocaleString()}</span>
                                 </div>
@@ -472,6 +645,11 @@ GALLERY_TEMPLATE = """
                                             data-id="${item.id}" 
                                             ${votedImages.has(item.id) ? 'disabled' : ''}>
                                         ${votedImages.has(item.id) ? '✓ Voted' : '↑ Upvote'}
+                                    </button>
+                                    <button class="reflection-button" onclick="showReflection('${item.id}', \`${item.reflection?.replace(/`/g, '\\`') || 'No reflection available'}\`)" title="View IRIS's Reflection">
+                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                                            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/>
+                                        </svg>
                                     </button>
                                     <button class="share-button" onclick="shareArtwork('${item.id}', '${(item.description || 'Geometric pattern').replace(/'/g, "\\'")}')" title="Share">
                                         <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
@@ -567,7 +745,10 @@ GALLERY_TEMPLATE = """
         });
 
         // Initial load
-        loadGallery();
+        document.addEventListener('DOMContentLoaded', () => {
+            console.log('Initializing gallery...');
+            loadGallery('new');
+        });
 
         // Refresh gallery periodically
         setInterval(() => loadGallery(currentSort), 30000);
@@ -1692,6 +1873,89 @@ HTML_TEMPLATE = """
             color: var(--bg-darker);
             transform: translateY(-2px);
         }
+
+        /* Add artwork page specific styles */
+        .artwork-container {
+            max-width: 1200px;
+            margin: 100px auto;
+            padding: 20px;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 40px;
+        }
+        
+        .artwork-image {
+            width: 100%;
+            border: 1px solid var(--primary);
+            border-radius: 15px;
+            overflow: hidden;
+            background: rgba(0, 17, 0, 0.8);
+            transition: all 0.3s ease;
+        }
+        
+        .artwork-image:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 5px 20px rgba(0, 255, 0, 0.2);
+        }
+        
+        .artwork-image img {
+            width: 100%;
+            height: auto;
+            display: block;
+            object-fit: contain;
+            background: #000;
+        }
+        
+        .artwork-details {
+            padding: 30px;
+            background: rgba(0, 17, 0, 0.8);
+            border: 1px solid var(--primary);
+            border-radius: 15px;
+        }
+        
+        .artwork-details h1 {
+            margin: 0 0 20px 0;
+            font-size: 2em;
+            color: var(--primary);
+            text-shadow: 0 0 10px var(--primary-dim);
+        }
+        
+        .artwork-description {
+            margin-bottom: 30px;
+            line-height: 1.6;
+        }
+        
+        .artwork-description h2 {
+            color: var(--primary);
+            margin-bottom: 15px;
+        }
+        
+        .artwork-reflection {
+            padding: 20px;
+            border-left: 2px solid var(--primary);
+            background: rgba(0, 255, 0, 0.05);
+            margin: 20px 0;
+            border-radius: 5px;
+        }
+        
+        .artwork-reflection h2 {
+            color: var(--primary);
+            margin-bottom: 15px;
+        }
+        
+        .artwork-meta {
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid var(--primary-dim);
+            color: var(--primary-dim);
+        }
+        
+        @media (max-width: 768px) {
+            .artwork-container {
+                grid-template-columns: 1fr;
+                margin-top: 80px;
+            }
+        }
     </style>
 </head>
 <body>
@@ -2025,4 +2289,252 @@ HTML_TEMPLATE = """
     </script>
 </body>
 </html>
+"""# Update the ARTWORK_TEMPLATE
+ARTWORK_TEMPLATE = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>IRIS - Artwork Details</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/jpeg" href="https://pbs.twimg.com/profile_images/1855417793144905728/n-GZFGq7_400x400.jpg">
+    <style>
+        :root {{
+            --primary: #00ff00;
+            --primary-dim: #004400;
+            --bg-dark: #111111;
+            --bg-darker: #000000;
+            --text: #00ff00;
+            --success: #00ff00;
+            --hover: #00aa00;
+        }}
+
+        body {{
+            background: var(--bg-dark);
+            color: var(--text);
+            font-family: 'Courier New', monospace;
+            margin: 0;
+            min-height: 100vh;
+        }}
+
+        .nav-bar {{
+            position: fixed;
+            top: 0;
+            width: 100%;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 20px;
+            background: rgba(0, 17, 0, 0.95);
+            border-bottom: 1px solid var(--primary);
+            backdrop-filter: blur(10px);
+            z-index: 1000;
+        }}
+
+        .nav-left {{
+            display: flex;
+            align-items: center;
+            gap: 20px;
+        }}
+
+        .home-link, .twitter-link {{
+            color: var(--primary);
+            text-decoration: none;
+            padding: 8px 16px;
+            border: 1px solid var(--primary);
+            border-radius: 20px;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }}
+
+        .home-link:hover, .twitter-link:hover {{
+            background: var(--primary);
+            color: var(--bg-darker);
+            transform: translateY(-2px);
+        }}
+
+        .artwork-container {{
+            max-width: 1200px;
+            margin: 100px auto;
+            padding: 20px;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 40px;
+        }}
+
+        .artwork-image {{
+            width: 100%;
+            border: 1px solid var(--primary);
+            border-radius: 15px;
+            overflow: hidden;
+            background: rgba(0, 17, 0, 0.8);
+            transition: all 0.3s ease;
+        }}
+
+        .artwork-image:hover {{
+            transform: translateY(-5px);
+            box-shadow: 0 5px 20px rgba(0, 255, 0, 0.2);
+        }}
+
+        .artwork-image img {{
+            width: 100%;
+            height: auto;
+            display: block;
+            object-fit: contain;
+            background: #000;
+        }}
+
+        .artwork-details {{
+            padding: 30px;
+            background: rgba(0, 17, 0, 0.8);
+            border: 1px solid var(--primary);
+            border-radius: 15px;
+        }}
+
+        .artwork-details h1 {{
+            margin: 0 0 20px 0;
+            font-size: 2em;
+            color: var(--primary);
+            text-shadow: 0 0 10px var(--primary-dim);
+        }}
+
+        .artwork-description {{
+            margin-bottom: 30px;
+            line-height: 1.6;
+        }}
+
+        .artwork-description h2 {{
+            color: var(--primary);
+            margin-bottom: 15px;
+        }}
+
+        .artwork-reflection {{
+            padding: 20px;
+            border-left: 2px solid var(--primary);
+            background: rgba(0, 255, 0, 0.05);
+            margin: 20px 0;
+            border-radius: 5px;
+        }}
+
+        .artwork-reflection h2 {{
+            color: var(--primary);
+            margin-bottom: 15px;
+        }}
+
+        .artwork-meta {{
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid var(--primary-dim);
+            color: var(--primary-dim);
+        }}
+
+        .connect-wallet-btn {{
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: transparent;
+            border: 1px solid var(--primary-dim);
+            color: var(--primary-dim);
+            padding: 8px 16px;
+            border-radius: 20px;
+            cursor: not-allowed;
+            transition: all 0.3s ease;
+            font-family: 'Courier New', monospace;
+        }}
+
+        @media (max-width: 768px) {{
+            .artwork-container {{
+                grid-template-columns: 1fr;
+                margin-top: 80px;
+            }}
+        }}
+    </style>
+</head>
+<body>
+    <div class="nav-bar">
+        <div class="nav-left">
+            <a href="/gallery" class="home-link">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M19 12H5M12 19l-7-7 7-7"/>
+                </svg>
+                Back to Gallery
+            </a>
+        </div>
+        <div class="nav-right">
+            <button class="connect-wallet-btn" disabled title="Coming soon: Connect wallet to bid on NFTs with $IRIS">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M21 18v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v1"/>
+                    <polyline points="15 10 20 10 20 14 15 14"/>
+                    <path d="M20 12H9"/>
+                </svg>
+                Connect Wallet
+            </button>
+            <a href="https://x.com/IRISAISOLANA" target="_blank" class="twitter-link">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
+                </svg>
+                Follow @IRISAISOLANA
+            </a>
+        </div>
+    </div>
+
+    <div class="artwork-container">
+        <div class="artwork-image">
+            <img src="{artwork_url}" alt="{artwork_description}">
+        </div>
+        <div class="artwork-details">
+            <h1>IRIS Creation #{artwork_id}</h1>
+            <div class="artwork-description">
+                <h2>Description</h2>
+                <p>{artwork_description}</p>
+            </div>
+            <div class="artwork-reflection">
+                <h2>IRIS's Reflection</h2>
+                <p>{artwork_reflection}</p>
+            </div>
+            <div class="artwork-meta">
+                <p>Created: {artwork_timestamp}</p>
+                <p>Votes: {artwork_votes}</p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
 """
+
+# Terminal Configuration
+TERMINAL_CONFIG = {
+    "prompt": "iris> ",
+    "history_file": ".iris_history",
+    "max_history": 1000
+}
+
+# Command Categories
+COMMAND_CATEGORIES = {
+    "art": ["generate", "gallery", "reflect"],
+    "system": ["help", "clear", "exit"],
+    "config": ["set", "get", "reset"]
+}
+
+# Terminal Features
+TERMINAL_FEATURES = {
+    "autocomplete": True,
+    "syntax_highlighting": True,
+    "command_history": True,
+    "real_time_updates": True
+}
+
+# Update SYSTEM_PROMPTS to include terminal prompt
+SYSTEM_PROMPTS.update({
+    "terminal": """You are IRIS Terminal, a command-line interface for the IRIS art generation system.
+    Process user commands and provide responses in a clear, terminal-friendly format.
+    Keep responses concise but informative."""
+})
+
+# Add terminal-specific logging
+LOGGING_CONFIG = {
+    "level": "INFO",
+    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    "file": "iris_terminal.log"
+}

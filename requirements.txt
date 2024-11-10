@@ -12,3 +12,4 @@ jiter
 pydantic
 sniffio
 typing-extensions
+cloudinary==1.36.0

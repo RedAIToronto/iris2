@@ -18,7 +18,8 @@ from config import (
     AI_TAGLINE, 
     HTML_TEMPLATE, 
     GALLERY_TEMPLATE,
-    SYSTEM_PROMPTS
+    SYSTEM_PROMPTS,
+    ARTWORK_TEMPLATE
 )
 from pprint import pformat
 import math
@@ -553,6 +554,16 @@ Keep your reflection personal and introspective, as if sharing with a friend."""
                         reflection = await self.reflect_on_creation(idea)
                         self.current_reflection = reflection
                         
+                        # Request canvas data AFTER reflection is ready
+                        logger.info("📸 Requesting canvas data for gallery...")
+                        await self.broadcast_state({
+                            "type": "request_canvas_data",
+                            "drawing_id": self.current_drawing["id"]
+                        })
+                        
+                        # Add a small delay to ensure canvas data is received
+                        await asyncio.sleep(1)
+                        
                         # Share reflection with viewers
                         await self.broadcast_state({
                             "type": "reflection_update",
@@ -580,10 +591,14 @@ Keep your reflection personal and introspective, as if sharing with a friend."""
                 logger.error("No current drawing to save")
                 return False
 
+            logger.info(f"Starting gallery save for drawing {self.current_drawing['id']}")
+            
+            # Process canvas data
             logger.info("Processing canvas data for upload...")
             img_data = canvas_data.split(',')[1]
             img_bytes = base64.b64decode(img_data)
             
+            # Upload to Cloudinary
             logger.info("Uploading to Cloudinary...")
             upload_result = upload(
                 img_bytes,
@@ -592,14 +607,14 @@ Keep your reflection personal and introspective, as if sharing with a friend."""
                 resource_type="image"
             )
             
-            # Log the upload result
+            # Log full upload result
             logger.info(f"Cloudinary upload result: {upload_result}")
             
             image_url = upload_result.get('secure_url')
             if not image_url:
                 logger.error("No URL in upload result")
                 return False
-            
+                
             logger.info(f"Successfully uploaded to Cloudinary: {image_url}")
             
             # Save metadata
@@ -609,6 +624,7 @@ Keep your reflection personal and introspective, as if sharing with a friend."""
             if os.path.exists(gallery_file):
                 with open(gallery_file, "r") as f:
                     gallery_data = json.load(f)
+                    logger.info(f"Loaded existing gallery with {len(gallery_data)} items")
             
             new_entry = {
                 "id": self.current_drawing["id"],
@@ -616,7 +632,8 @@ Keep your reflection personal and introspective, as if sharing with a friend."""
                 "description": self.current_drawing.get("idea", "Geometric pattern"),
                 "reflection": self.current_reflection or "",
                 "timestamp": datetime.now().isoformat(),
-                "votes": 0
+                "votes": 0,
+                "pixel_count": self.current_drawing.get("pixel_count", 0)
             }
             
             logger.info(f"Adding new entry: {new_entry}")
@@ -626,10 +643,19 @@ Keep your reflection personal and introspective, as if sharing with a friend."""
                 json.dump(gallery_data, f, indent=2)
                 
             logger.info("Successfully saved to gallery")
+            
+            # Broadcast update to all viewers
+            await self.broadcast_state({
+                "type": "gallery_update",
+                "action": "new_item",
+                "item": new_entry
+            })
+            
             return True
                 
         except Exception as e:
             logger.error(f"Error in save_to_gallery: {e}")
+            logger.error(f"Error details: {str(e)}")
             return False
 
     def _calculate_circle_points(self, center_x: float, center_y: float, radius: float, points: int = 32) -> List[List[float]]:
@@ -769,7 +795,7 @@ async def websocket_endpoint(websocket: WebSocket):
         # Add to viewers
         generator.viewers.add(websocket)
         
-        # Send initial state including current drawing state
+        # Send initial state
         initial_state = {
             "type": "display_update",
             "status": generator.current_status,
@@ -781,9 +807,8 @@ async def websocket_endpoint(websocket: WebSocket):
             "total_creations": generator.total_creations,
             "total_pixels": generator.total_pixels_drawn
         }
-
         await websocket.send_json(initial_state)
-
+        
         # If there's a current drawing, send its state
         if generator.current_state:
             for cmd in generator.current_state:
@@ -795,6 +820,14 @@ async def websocket_endpoint(websocket: WebSocket):
             
             if data.get("type") == "subscribe_status":
                 await websocket.send_json(initial_state)
+            elif data.get("type") == "canvas_data":
+                # Handle canvas data for gallery save
+                logger.info("Received canvas data, saving to gallery...")
+                success = await generator.save_to_gallery(data.get("data", ""))
+                if success:
+                    logger.info("Successfully saved to gallery")
+                else:
+                    logger.error("Failed to save to gallery")
                 
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected")
@@ -856,22 +889,20 @@ async def get_gallery(sort: str = "new", limit: int = 50, offset: int = 0):
         gallery_file = "data/gallery_data.json"
         logger.info(f"Loading gallery from {gallery_file}")
         
-        # Check if file exists
         if not os.path.exists(gallery_file):
             logger.warning(f"Gallery file not found at {os.path.abspath(gallery_file)}")
-            # Initialize with empty array
             with open(gallery_file, "w") as f:
                 json.dump([], f)
             return {"success": True, "items": []}
             
-        # Read gallery data
         with open(gallery_file, "r") as f:
             items = json.load(f)
             logger.info(f"Loaded {len(items)} items from gallery")
             
-            # Log first item for debugging
+            # Log sample items for debugging
             if items:
-                logger.info(f"Sample item: {items[0]}")
+                logger.info(f"First item: {items[0]}")
+                logger.info(f"Last item: {items[-1]}")
             
             # Sort items
             if sort == "votes":
@@ -1021,6 +1052,71 @@ async def get_versions():
         "api_key_prefix": ANTHROPIC_API_KEY[:10] + "...",
         "model": "claude-3-sonnet-20240229"  # Current model we're using
     }
+
+@app.get("/artwork/{artwork_id}")
+async def get_artwork_page(artwork_id: str):
+    """Serve individual artwork page"""
+    try:
+        gallery_file = "data/gallery_data.json"
+        if not os.path.exists(gallery_file):
+            logger.error(f"Gallery file not found: {gallery_file}")
+            raise HTTPException(status_code=404, detail="Gallery not found")
+            
+        with open(gallery_file, "r") as f:
+            items = json.load(f)
+            
+        # Log for debugging
+        logger.info(f"Looking for artwork ID: {artwork_id}")
+        logger.info(f"Found {len(items)} items in gallery")
+        
+        for item in items:
+            if str(item["id"]) == str(artwork_id):
+                logger.info(f"Found artwork: {item}")
+                try:
+                    # Validate required fields
+                    artwork_url = item.get("url")
+                    if not artwork_url:
+                        logger.error("Missing URL for artwork")
+                        raise HTTPException(status_code=500, detail="Invalid artwork data")
+
+                    # Safely get timestamp
+                    timestamp = item.get("timestamp")
+                    if timestamp:
+                        try:
+                            formatted_timestamp = datetime.fromisoformat(timestamp).strftime("%B %d, %Y, %I:%M %p")
+                        except ValueError as e:
+                            logger.error(f"Invalid timestamp format: {e}")
+                            formatted_timestamp = "Date unknown"
+                    else:
+                        formatted_timestamp = "Date unknown"
+
+                    # Create a formatted HTML string with the artwork data
+                    artwork_html = ARTWORK_TEMPLATE.format(
+                        artwork_url=artwork_url,
+                        artwork_description=item.get("description", "No description available"),
+                        artwork_reflection=item.get("reflection", "No reflection available"),
+                        artwork_id=str(artwork_id),
+                        artwork_timestamp=formatted_timestamp,
+                        artwork_votes=str(item.get("votes", 0))
+                    )
+                    
+                    return HTMLResponse(artwork_html)
+                    
+                except Exception as format_error:
+                    logger.error(f"Error formatting artwork data: {format_error}")
+                    logger.error(f"Item data: {item}")
+                    raise HTTPException(status_code=500, detail=f"Error formatting artwork: {str(format_error)}")
+                
+        # If we get here, artwork wasn't found
+        logger.error(f"Artwork not found: {artwork_id}")
+        raise HTTPException(status_code=404, detail="Artwork not found")
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error loading artwork: {str(e)}")
+        logger.error(f"Full error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error loading artwork: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
