@@ -173,9 +173,9 @@ class CircuitBreaker:
 
 class ArtGenerator:
     def __init__(self):
-        self.viewers: Set[WebSocket] = set()
-        self.current_drawing: Dict[str, Any] = None
-        self.current_state: List[Dict[str, Any]] = []
+        self.viewers = set()
+        self.current_drawing = None
+        self.current_state = []
         self.current_status = "waiting"
         self.current_phase = "initializing"
         self.current_idea = None
@@ -184,24 +184,20 @@ class ArtGenerator:
         self.is_running = False
         self.client = Anthropic(api_key=ANTHROPIC_API_KEY)
         self.messages = self.client.messages
-        self.generation_interval = 120  # Increase to 2 minutes
+        self.generation_interval = 120
         self.total_pixels_drawn = 0
         self.complexity_score = 0
-        self.last_generation_time = datetime.now()
+        self.generation_lock = asyncio.Lock()
+        self.file_lock = FileLock("data/gallery_data.json")
+        self.min_generation_interval = 120
+        self.max_retries = 3
+        self.retry_delay = 10
+        self.api_breaker = CircuitBreaker()
+        # Set a default time, will be updated in initialize()
+        self.last_generation_time = datetime.now() - timedelta(minutes=5)
         
         # Initialize stats from gallery
         self._load_initial_stats()
-
-        # Add lock
-        self.generation_lock = asyncio.Lock()
-        self.file_lock = FileLock("data/gallery_data.json")
-        self.min_generation_interval = 120  # Match generation interval
-        self.max_retries = 3  # Add retry count
-        self.retry_delay = 10  # Seconds between retries
-        self.api_breaker = CircuitBreaker()
-
-        # Initialize last_generation_time from database
-        self.last_generation_time = asyncio.run(db_service.get_last_generation_time())
 
     def _load_initial_stats(self):
         """Synchronously initialize statistics from gallery"""
@@ -595,7 +591,7 @@ IMPORTANT:
 
             except Exception as e:
                 retries += 1
-                logger.error(f"❌ Error in IRIS's reflection (attempt {retries}): {str(e)}")
+                logger.error(f"��� Error in IRIS's reflection (attempt {retries}): {str(e)}")
                 if retries < self.max_retries:
                     await asyncio.sleep(self.retry_delay)
                 else:
@@ -856,8 +852,7 @@ IMPORTANT:
             logger.info(f"Initialized last generation time: {self.last_generation_time}")
         except Exception as e:
             logger.error(f"Error initializing generation time: {e}")
-            # Set a safe default if we can't get the last generation time
-            self.last_generation_time = datetime.now() - timedelta(minutes=5)
+            # Keep using the default time set in __init__
             logger.info(f"Using default generation time: {self.last_generation_time}")
 
 # Add this function to migrate old gallery data
