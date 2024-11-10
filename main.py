@@ -591,7 +591,7 @@ IMPORTANT:
 
             except Exception as e:
                 retries += 1
-                logger.error(f"��� Error in IRIS's reflection (attempt {retries}): {str(e)}")
+                logger.error(f" Error in IRIS's reflection (attempt {retries}): {str(e)}")
                 if retries < self.max_retries:
                     await asyncio.sleep(self.retry_delay)
                 else:
@@ -707,19 +707,32 @@ IMPORTANT:
     async def save_to_gallery(self, canvas_data: str):
         """Save drawing to gallery using Cloudinary and PlanetScale"""
         try:
-            # Use generation lock to ensure only one save at a time
             async with self.generation_lock:
                 if not self.current_drawing:
                     logger.error("No current drawing to save")
                     return False
 
+                # Check for recent duplicates
+                with db_service.get_connection() as conn:
+                    with conn.cursor() as cursor:
+                        cursor.execute("""
+                            SELECT id FROM gallery 
+                            WHERE timestamp > DATE_SUB(NOW(), INTERVAL 1 MINUTE)
+                        """)
+                        if cursor.fetchone():
+                            logger.warning("Recent save detected, preventing duplicate")
+                            return False
+
+                # Process canvas data and upload
+                logger.info("Processing canvas data for upload...")
+                img_data = canvas_data.split(',')[1]
+                img_bytes = base64.b64decode(img_data)
+                
                 # Generate unique ID
                 unique_id = datetime.now().strftime("%Y%m%d_%H%M%S")
                 
                 # Upload to Cloudinary
                 logger.info("Uploading to Cloudinary...")
-                img_data = canvas_data.split(',')[1]
-                img_bytes = base64.b64decode(img_data)
                 upload_result = upload(
                     img_bytes,
                     folder="iris_gallery",
@@ -737,17 +750,17 @@ IMPORTANT:
                     "id": unique_id,
                     "url": image_url,
                     "description": self.current_drawing.get("idea", "Geometric pattern"),
-                    "reflection": self.current_reflection or "Contemplating this creation in digital silence...",
+                    "reflection": self.current_reflection or "",
                     "timestamp": datetime.now().isoformat(),
                     "votes": 0,
                     "pixel_count": self.current_drawing.get("pixel_count", 0)
                 }
 
-                # Save to database
+                # Save to database with duplicate check
                 with db_service.get_connection() as conn:
                     with conn.cursor() as cursor:
                         cursor.execute("""
-                            INSERT INTO gallery 
+                            INSERT IGNORE INTO gallery 
                             (id, url, description, reflection, timestamp, votes, pixel_count)
                             VALUES (%s, %s, %s, %s, %s, %s, %s)
                         """, (
@@ -759,11 +772,12 @@ IMPORTANT:
                             new_entry["votes"],
                             new_entry["pixel_count"]
                         ))
+                        
+                        if cursor.rowcount == 0:
+                            logger.warning("Duplicate entry prevented")
+                            return False
 
                 logger.info(f"Successfully saved artwork {unique_id} to gallery")
-                
-                # Update last generation time
-                self.last_generation_time = datetime.now()
                 
                 # Broadcast update
                 await self.broadcast_state({
@@ -1176,15 +1190,37 @@ async def get_status():
 # Update the gallery endpoints to use the database service
 @app.get("/api/gallery")
 async def get_gallery(sort: str = "new", limit: int = 50, offset: int = 0):
+    """Get gallery items with sorting and pagination"""
     try:
-        items = await db_service.get_gallery_items(sort, limit, offset)
-        return {
-            "success": True,
-            "items": items,
-            "total": len(items)
-        }
+        logger.info(f"Fetching gallery items from PlanetScale (sort: {sort}, limit: {limit}, offset: {offset})")
+        with db_service.get_connection() as conn:
+            with conn.cursor(MySQLdb.cursors.DictCursor) as cursor:
+                # Get items with sorting
+                order_by = "timestamp DESC" if sort == "new" else "votes DESC"
+                query = f"""
+                    SELECT * FROM gallery 
+                    ORDER BY {order_by}
+                    LIMIT %s OFFSET %s
+                """
+                logger.info(f"Executing query: {query} with params: {limit}, {offset}")
+                cursor.execute(query, (limit, offset))
+                items = cursor.fetchall()
+                
+                # Convert datetime objects to strings for JSON serialization
+                for item in items:
+                    if isinstance(item['timestamp'], datetime):
+                        item['timestamp'] = item['timestamp'].isoformat()
+
+                logger.info(f"Retrieved {len(items)} items from PlanetScale")
+                logger.info(f"First item: {items[0] if items else None}")
+
+                return {
+                    "success": True,
+                    "items": items,
+                    "total": len(items)
+                }
     except Exception as e:
-        logger.error(f"Error in get_gallery: {e}")
+        logger.error(f"Error loading gallery: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
 
 @app.get("/static/gallery/{filename}")
@@ -1563,6 +1599,79 @@ async def shutdown_event():
     logger.info("Shutdown complete")
 
 app.add_event_handler("shutdown", shutdown_event)
+
+@app.get("/api/debug/db-test")
+async def test_db():
+    """Test database connection and content"""
+    try:
+        with db_service.get_connection() as conn:
+            with conn.cursor(MySQLdb.cursors.DictCursor) as cursor:
+                # Test connection
+                cursor.execute("SELECT 1")
+                
+                # Get table info
+                cursor.execute("SHOW TABLES")
+                tables = cursor.fetchall()
+                
+                # Get gallery count
+                cursor.execute("SELECT COUNT(*) as count FROM gallery")
+                count = cursor.fetchone()['count']
+                
+                # Get sample data
+                cursor.execute("SELECT * FROM gallery LIMIT 1")
+                sample = cursor.fetchone()
+                
+                return {
+                    "status": "connected",
+                    "tables": [t['Tables_in_iris'] for t in tables],
+                    "gallery_count": count,
+                    "sample_item": sample
+                }
+    except Exception as e:
+        logger.error(f"Database test failed: {e}")
+        return {"status": "error", "message": str(e)}
+
+@app.get("/api/debug/gallery-items")
+async def debug_gallery_items():
+    """Debug endpoint to see raw gallery items"""
+    try:
+        with db_service.get_connection() as conn:
+            with conn.cursor(MySQLdb.cursors.DictCursor) as cursor:
+                cursor.execute("SELECT * FROM gallery ORDER BY timestamp DESC LIMIT 5")
+                items = cursor.fetchall()
+                
+                # Convert datetime objects to strings
+                for item in items:
+                    if isinstance(item['timestamp'], datetime):
+                        item['timestamp'] = item['timestamp'].isoformat()
+                
+                return {
+                    "success": True,
+                    "items": items,
+                    "count": len(items)
+                }
+    except Exception as e:
+        logger.error(f"Error in debug gallery items: {e}")
+        return {"success": False, "error": str(e)}
+
+@app.post("/api/debug/cleanup-duplicates")
+async def cleanup_duplicates():
+    """Remove duplicate entries from gallery"""
+    try:
+        with db_service.get_connection() as conn:
+            with conn.cursor() as cursor:
+                # Find and remove duplicates based on timestamp
+                cursor.execute("""
+                    DELETE g1 FROM gallery g1
+                    INNER JOIN gallery g2
+                    WHERE g1.id > g2.id
+                    AND g1.timestamp = g2.timestamp
+                """)
+                deleted = cursor.rowcount
+                return {"success": True, "deleted": deleted}
+    except Exception as e:
+        logger.error(f"Error cleaning duplicates: {e}")
+        return {"success": False, "error": str(e)}
 
 if __name__ == "__main__":
     import uvicorn

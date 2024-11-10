@@ -7,7 +7,6 @@ import certifi
 load_dotenv()
 
 def get_db_connection():
-    # Windows-specific SSL handling
     ssl_cert = certifi.where()
     config = {
         "host": os.getenv("DATABASE_HOST"),
@@ -48,22 +47,25 @@ def migrate_data():
 
         # Insert items
         for item in items:
-            cursor.execute("""
-                INSERT IGNORE INTO gallery 
-                (id, url, description, reflection, timestamp, votes, pixel_count)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-            """, (
-                item["id"],
-                item.get("url", ""),
-                item.get("description", ""),
-                item.get("reflection", ""),
-                item["timestamp"],
-                item.get("votes", 0),
-                item.get("pixel_count", 0)
-            ))
-            print(f"Migrated item {item['id']}")
+            try:
+                cursor.execute("""
+                    INSERT IGNORE INTO gallery 
+                    (id, url, description, reflection, timestamp, votes, pixel_count)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    item["id"],
+                    item.get("url", ""),
+                    item.get("description", ""),
+                    item.get("reflection", ""),
+                    item["timestamp"],
+                    item.get("votes", 0),
+                    item.get("pixel_count", 0)
+                ))
+                print(f"Migrated item {item['id']}")
+            except Exception as e:
+                print(f"Error migrating item {item['id']}: {e}")
+                continue
 
-        conn.commit()
         print("Migration completed successfully!")
 
     except Exception as e:
