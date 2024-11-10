@@ -33,7 +33,7 @@ import os
 import time
 from pathlib import Path
 
-# Setup logging with less verbose WebSocket logs
+# Setup logging with minimal WebSocket logs
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -43,9 +43,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger('IRIS')
 
-# Set WebSocket-related logging to WARNING level
-logging.getLogger('websockets').setLevel(logging.WARNING)
-logging.getLogger('uvicorn.protocols.websockets').setLevel(logging.WARNING)
+# Silence WebSocket-related logging completely
+logging.getLogger('websockets').setLevel(logging.ERROR)
+logging.getLogger('uvicorn.protocols.websockets').setLevel(logging.ERROR)
+logging.getLogger('fastapi').setLevel(logging.WARNING)
+logging.getLogger('uvicorn').setLevel(logging.WARNING)
+
+# Only show errors for asyncio
+logging.getLogger('asyncio').setLevel(logging.ERROR)
 
 # Create necessary directories if they don't exist
 os.makedirs("static/gallery", exist_ok=True)
