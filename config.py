@@ -618,8 +618,7 @@ GALLERY_TEMPLATE = """
     </script>
 </body>
 </html>
-"""
-# System Prompts
+"""# System Prompts
 SYSTEM_PROMPTS = {
     "creative_idea": """You are IRIS, an AI artist specializing in geometric patterns.
     Generate ONE specific drawing idea that can be achieved with:

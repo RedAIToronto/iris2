@@ -22,6 +22,7 @@ from config import (
 )
 from pprint import pformat
 import math
+import anthropic
 
 # Setup logging
 logging.basicConfig(
@@ -53,6 +54,7 @@ class ArtGenerator:
         self.total_creations = 0
         self.is_running = False
         self.client = Anthropic(api_key=ANTHROPIC_API_KEY)
+        self.messages = self.client.messages
         self.generation_interval = 30
         self.total_pixels_drawn = 0
         self.complexity_score = 0
@@ -121,7 +123,7 @@ class ArtGenerator:
 
             try:
                 message = await asyncio.to_thread(
-                    self.client.messages.create,
+                    self.messages.create,
                     model="claude-3-sonnet-20240229",
                     max_tokens=1024,
                     temperature=0.9,
@@ -992,6 +994,14 @@ async def get_gallery_item(image_id: str):
     except Exception as e:
         logger.error(f"Error getting gallery item: {e}")
         raise HTTPException(status_code=500, detail="Error retrieving gallery item")
+
+@app.get("/api/debug/versions")
+async def get_versions():
+    return {
+        "anthropic_version": anthropic.__version__,
+        "api_key_prefix": ANTHROPIC_API_KEY[:10] + "...",
+        "model": "claude-3-sonnet-20240229"  # Current model we're using
+    }
 
 if __name__ == "__main__":
     import uvicorn
