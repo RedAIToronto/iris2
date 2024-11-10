@@ -666,30 +666,23 @@ Keep your reflection personal and introspective, as if sharing with a friend."""
 
             # Use context manager for the lock
             with self.file_lock:
-                # Generate unique ID
+                # Generate unique ID with timestamp and random string
                 unique_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
                 
-                # Check for duplicates
+                # Load existing gallery data
                 gallery_file = "data/gallery_data.json"
                 existing_items = []
                 if os.path.exists(gallery_file):
                     with open(gallery_file, "r") as f:
                         existing_items = json.load(f)
                 
-                # Check for recent duplicates
-                recent_items = [item for item in existing_items 
-                              if (datetime.now() - datetime.fromisoformat(item["timestamp"])).seconds < 300]
-                
-                if recent_items:
-                    logger.warning(f"Found {len(recent_items)} recent items, skipping generation")
-                    return False
-
                 # Process canvas data and upload
                 logger.info("Processing canvas data for upload...")
                 img_data = canvas_data.split(',')[1]
                 img_bytes = base64.b64decode(img_data)
                 
                 # Upload to Cloudinary
+                logger.info("Uploading to Cloudinary...")
                 upload_result = upload(
                     img_bytes,
                     folder="iris_gallery",
@@ -713,18 +706,28 @@ Keep your reflection personal and introspective, as if sharing with a friend."""
                     "pixel_count": self.current_drawing.get("pixel_count", 0)
                 }
                 
-                # Add to gallery
+                logger.info(f"Created new gallery entry: {new_entry}")
+                
+                # Add to beginning of gallery
                 existing_items.insert(0, new_entry)
                 
                 # Save updated gallery
                 with open(gallery_file, "w") as f:
                     json.dump(existing_items, f, indent=2)
                 
+                # Broadcast update to all clients
+                await self.broadcast_state({
+                    "type": "gallery_update",
+                    "action": "new_item",
+                    "item": new_entry
+                })
+                
                 logger.info(f"Successfully saved artwork {unique_id} to gallery")
                 return True
                 
         except Exception as e:
             logger.error(f"Error in save_to_gallery: {e}")
+            logger.error(f"Full error: {e}", exc_info=True)
             return False
 
     def _calculate_circle_points(self, center_x: float, center_y: float, radius: float, points: int = 32) -> List[List[float]]:
@@ -863,6 +866,7 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         # Add to viewers
         generator.viewers.add(websocket)
+        logger.info(f"Active viewers: {len(generator.viewers)}")
         
         # Send initial state
         initial_state = {
@@ -870,6 +874,7 @@ async def websocket_endpoint(websocket: WebSocket):
             "status": generator.current_status,
             "phase": generator.current_phase,
             "idea": generator.current_idea,
+            "reflection": generator.current_reflection,
             "timestamp": datetime.now().isoformat(),
             "viewers": len(generator.viewers),
             "is_running": generator.is_running,
@@ -895,11 +900,22 @@ async def websocket_endpoint(websocket: WebSocket):
                 success = await generator.save_to_gallery(data.get("data", ""))
                 if success:
                     logger.info("Successfully saved to gallery")
+                    # Send confirmation back to client
+                    await websocket.send_json({
+                        "type": "save_success",
+                        "message": "Artwork saved to gallery"
+                    })
                 else:
                     logger.error("Failed to save to gallery")
+                    await websocket.send_json({
+                        "type": "save_error",
+                        "message": "Failed to save artwork"
+                    })
                 
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected")
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}")
     finally:
         generator.viewers.remove(websocket)
         await generator.broadcast_state({
@@ -968,25 +984,32 @@ async def get_gallery(sort: str = "new", limit: int = 50, offset: int = 0):
             items = json.load(f)
             logger.info(f"Loaded {len(items)} items from gallery")
             
-            # Log sample items for debugging
-            if items:
-                logger.info(f"First item: {items[0]}")
-                logger.info(f"Last item: {items[-1]}")
+            # Remove any duplicates by ID
+            seen_ids = set()
+            unique_items = []
+            for item in items:
+                if item["id"] not in seen_ids:
+                    seen_ids.add(item["id"])
+                    unique_items.append(item)
             
             # Sort items
             if sort == "votes":
-                items.sort(key=lambda x: x.get("votes", 0), reverse=True)
+                unique_items.sort(key=lambda x: x.get("votes", 0), reverse=True)
             else:  # sort by new
-                items.sort(key=lambda x: x["timestamp"], reverse=True)
+                unique_items.sort(key=lambda x: x["timestamp"], reverse=True)
+            
+            # Apply limit and offset
+            paginated_items = unique_items[offset:offset + limit]
             
             return {
                 "success": True,
-                "items": items
+                "items": paginated_items,
+                "total": len(unique_items)
             }
         
     except Exception as e:
         logger.error(f"Error loading gallery: {e}")
-        logger.error(f"Current working directory: {os.getcwd()}")
+        logger.error(f"Full error: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
 
 @app.get("/static/gallery/{filename}")
@@ -1258,6 +1281,28 @@ async def import_gallery(gallery_data: List[dict], api_key: APIKey = Depends(get
     except Exception as e:
         logger.error(f"Error importing gallery: {e}")
         raise HTTPException(status_code=500, detail="Error importing gallery")
+
+@app.get("/api/download-gallery")
+async def download_gallery():
+    """Download gallery data as JSON file"""
+    try:
+        gallery_file = "data/gallery_data.json"
+        if not os.path.exists(gallery_file):
+            raise HTTPException(status_code=404, detail="Gallery not found")
+            
+        with open(gallery_file, "r") as f:
+            items = json.load(f)
+            
+        return Response(
+            content=json.dumps(items, indent=2),
+            media_type="application/json",
+            headers={
+                "Content-Disposition": "attachment; filename=gallery_backup.json"
+            }
+        )
+    except Exception as e:
+        logger.error(f"Error downloading gallery: {e}")
+        raise HTTPException(status_code=500, detail="Error downloading gallery")
 
 if __name__ == "__main__":
     import uvicorn

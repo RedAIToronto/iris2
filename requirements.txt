@@ -16,3 +16,4 @@ cloudinary==1.41.0
 certifi
 six
 urllib3
+requests==2.31.0
