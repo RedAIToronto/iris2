@@ -1,4 +1,4 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Response, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Response, HTTPException, Security, Depends
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from anthropic import Anthropic
@@ -27,6 +27,11 @@ import anthropic
 from cloudinary.uploader import upload
 import cloudinary
 import cloudinary.api
+from fastapi.security.api_key import APIKeyHeader, APIKey
+import uuid
+import os
+import time
+from pathlib import Path
 
 # Setup logging
 logging.basicConfig(
@@ -53,6 +58,48 @@ cloudinary.config(
 )
 
 # First define the class
+class FileLock:
+    def __init__(self, path):
+        self.lock_file = Path(str(path) + '.lock')
+        self.locked = False
+
+    def acquire(self):
+        while True:
+            try:
+                # Try to create lock file
+                with open(self.lock_file, 'x') as f:
+                    f.write(str(os.getpid()))
+                self.locked = True
+                break
+            except FileExistsError:
+                # Check if the process holding the lock is still alive
+                try:
+                    with open(self.lock_file, 'r') as f:
+                        pid = int(f.read().strip())
+                    # On Windows, just wait and retry
+                    time.sleep(0.1)
+                except (ValueError, FileNotFoundError):
+                    # Lock file exists but is invalid/deleted, try to remove it
+                    try:
+                        self.lock_file.unlink()
+                    except FileNotFoundError:
+                        pass
+
+    def release(self):
+        if self.locked:
+            try:
+                self.lock_file.unlink()
+                self.locked = False
+            except FileNotFoundError:
+                pass
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.release()
+
 class ArtGenerator:
     def __init__(self):
         self.viewers: Set[WebSocket] = set()
@@ -76,6 +123,8 @@ class ArtGenerator:
 
         # Add lock
         self.generation_lock = asyncio.Lock()
+        self.file_lock = FileLock("data/gallery_data.json")
+        self.min_generation_interval = 60  # Minimum seconds between generations
 
     def _load_initial_stats(self):
         """Synchronously initialize statistics from gallery"""
@@ -530,11 +579,12 @@ Keep your reflection personal and introspective, as if sharing with a friend."""
             try:
                 # Try to acquire lock before starting new generation
                 async with self.generation_lock:
-                    # Check if enough time has passed since last generation
+                    # Check if enough time has passed
                     time_since_last = (datetime.now() - self.last_generation_time).total_seconds()
-                    if time_since_last < self.generation_interval:
-                        logger.info(f"Waiting {self.generation_interval - time_since_last}s before next creation...")
-                        await asyncio.sleep(self.generation_interval - time_since_last)
+                    if time_since_last < self.min_generation_interval:
+                        wait_time = self.min_generation_interval - time_since_last
+                        logger.info(f"Waiting {wait_time}s before next creation...")
+                        await asyncio.sleep(wait_time)
                         continue
 
                     # Ideation phase
@@ -605,7 +655,7 @@ Keep your reflection personal and introspective, as if sharing with a friend."""
             except Exception as e:
                 logger.error(f"❌ Error in creative process: {e}")
                 await self.update_status("error", "error")
-                await asyncio.sleep(2)
+                await asyncio.sleep(30)  # Longer delay on error
 
     async def save_to_gallery(self, canvas_data: str):
         """Save drawing to gallery using Cloudinary"""
@@ -614,71 +664,67 @@ Keep your reflection personal and introspective, as if sharing with a friend."""
                 logger.error("No current drawing to save")
                 return False
 
-            logger.info(f"Starting gallery save for drawing {self.current_drawing['id']}")
-            
-            # Process canvas data
-            logger.info("Processing canvas data for upload...")
-            img_data = canvas_data.split(',')[1]
-            img_bytes = base64.b64decode(img_data)
-            
-            # Upload to Cloudinary
-            logger.info("Uploading to Cloudinary...")
-            upload_result = upload(
-                img_bytes,
-                folder="iris_gallery",
-                public_id=f"drawing_{self.current_drawing['id']}",
-                resource_type="image"
-            )
-            
-            # Log full upload result
-            logger.info(f"Cloudinary upload result: {upload_result}")
-            
-            image_url = upload_result.get('secure_url')
-            if not image_url:
-                logger.error("No URL in upload result")
-                return False
+            # Use context manager for the lock
+            with self.file_lock:
+                # Generate unique ID
+                unique_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
                 
-            logger.info(f"Successfully uploaded to Cloudinary: {image_url}")
-            
-            # Save metadata
-            gallery_file = "data/gallery_data.json"
-            gallery_data = []
-            
-            if os.path.exists(gallery_file):
-                with open(gallery_file, "r") as f:
-                    gallery_data = json.load(f)
-                    logger.info(f"Loaded existing gallery with {len(gallery_data)} items")
-            
-            new_entry = {
-                "id": self.current_drawing["id"],
-                "url": image_url,  # Store the Cloudinary URL
-                "description": self.current_drawing.get("idea", "Geometric pattern"),
-                "reflection": self.current_reflection or "",
-                "timestamp": datetime.now().isoformat(),
-                "votes": 0,
-                "pixel_count": self.current_drawing.get("pixel_count", 0)
-            }
-            
-            logger.info(f"Adding new entry: {new_entry}")
-            gallery_data.insert(0, new_entry)
-            
-            with open(gallery_file, "w") as f:
-                json.dump(gallery_data, f, indent=2)
+                # Check for duplicates
+                gallery_file = "data/gallery_data.json"
+                existing_items = []
+                if os.path.exists(gallery_file):
+                    with open(gallery_file, "r") as f:
+                        existing_items = json.load(f)
                 
-            logger.info("Successfully saved to gallery")
-            
-            # Broadcast update to all viewers
-            await self.broadcast_state({
-                "type": "gallery_update",
-                "action": "new_item",
-                "item": new_entry
-            })
-            
-            return True
+                # Check for recent duplicates
+                recent_items = [item for item in existing_items 
+                              if (datetime.now() - datetime.fromisoformat(item["timestamp"])).seconds < 300]
+                
+                if recent_items:
+                    logger.warning(f"Found {len(recent_items)} recent items, skipping generation")
+                    return False
+
+                # Process canvas data and upload
+                logger.info("Processing canvas data for upload...")
+                img_data = canvas_data.split(',')[1]
+                img_bytes = base64.b64decode(img_data)
+                
+                # Upload to Cloudinary
+                upload_result = upload(
+                    img_bytes,
+                    folder="iris_gallery",
+                    public_id=f"drawing_{unique_id}",
+                    resource_type="image"
+                )
+                
+                image_url = upload_result.get('secure_url')
+                if not image_url:
+                    logger.error("No URL in upload result")
+                    return False
+                
+                # Create new entry
+                new_entry = {
+                    "id": unique_id,
+                    "url": image_url,
+                    "description": self.current_drawing.get("idea", "Geometric pattern"),
+                    "reflection": self.current_reflection or "",
+                    "timestamp": datetime.now().isoformat(),
+                    "votes": 0,
+                    "pixel_count": self.current_drawing.get("pixel_count", 0)
+                }
+                
+                # Add to gallery
+                existing_items.insert(0, new_entry)
+                
+                # Save updated gallery
+                with open(gallery_file, "w") as f:
+                    json.dump(existing_items, f, indent=2)
+                
+                logger.info(f"Successfully saved artwork {unique_id} to gallery")
+                return True
                 
         except Exception as e:
             logger.error(f"Error in save_to_gallery: {e}")
-            logger.error(f"Error details: {str(e)}")
             return False
 
     def _calculate_circle_points(self, center_x: float, center_y: float, radius: float, points: int = 32) -> List[List[float]]:
@@ -955,8 +1001,20 @@ async def get_gallery_image(filename: str):
         logger.error(f"Error serving image {filename}: {e}")
         return Response(status_code=500)
 
+API_KEY_NAME = "X-API-Key"
+API_KEY = os.getenv('API_KEY', 'your-default-key')  # Set this in your .env file
+api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=True)
+
+async def get_api_key(api_key_header: str = Security(api_key_header)):
+    if api_key_header == API_KEY:
+        return api_key_header
+    raise HTTPException(
+        status_code=403, 
+        detail="Could not validate API key"
+    )
+
 @app.post("/api/gallery/{image_id}/upvote")
-async def upvote_image(image_id: str):
+async def upvote_image(image_id: str, api_key: APIKey = Depends(get_api_key)):
     """Upvote a gallery image with proper error handling and data validation"""
     try:
         gallery_file = "data/gallery_data.json"
@@ -1140,6 +1198,66 @@ async def get_artwork_page(artwork_id: str):
         logger.error(f"Error loading artwork: {str(e)}")
         logger.error(f"Full error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error loading artwork: {str(e)}")
+
+# Add this utility function to main.py
+@app.get("/api/export-gallery")
+async def export_gallery(api_key: APIKey = Depends(get_api_key)):
+    """Export gallery data for backup/migration"""
+    try:
+        gallery_file = "data/gallery_data.json"
+        if not os.path.exists(gallery_file):
+            raise HTTPException(status_code=404, detail="Gallery not found")
+            
+        with open(gallery_file, "r") as f:
+            items = json.load(f)
+            
+        # Return as downloadable JSON file
+        return Response(
+            content=json.dumps(items, indent=2),
+            media_type="application/json",
+            headers={
+                "Content-Disposition": "attachment; filename=gallery_backup.json"
+            }
+        )
+    except Exception as e:
+        logger.error(f"Error exporting gallery: {e}")
+        raise HTTPException(status_code=500, detail="Error exporting gallery")
+
+@app.post("/api/import-gallery")
+async def import_gallery(gallery_data: List[dict], api_key: APIKey = Depends(get_api_key)):
+    """Import gallery data from backup"""
+    try:
+        gallery_file = "data/gallery_data.json"
+        
+        # Backup existing data first
+        if os.path.exists(gallery_file):
+            backup_file = f"{gallery_file}.backup"
+            with open(gallery_file, "r") as f:
+                existing_data = json.load(f)
+            with open(backup_file, "w") as f:
+                json.dump(existing_data, f, indent=2)
+        
+        # Merge new data with existing data, avoiding duplicates
+        existing_ids = {item["id"] for item in existing_data}
+        new_items = [item for item in gallery_data if item["id"] not in existing_ids]
+        
+        # Combine and sort by timestamp
+        combined_data = existing_data + new_items
+        combined_data.sort(key=lambda x: x["timestamp"], reverse=True)
+        
+        # Save merged data
+        with open(gallery_file, "w") as f:
+            json.dump(combined_data, f, indent=2)
+            
+        return {
+            "success": True,
+            "message": f"Imported {len(new_items)} new items",
+            "total_items": len(combined_data)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error importing gallery: {e}")
+        raise HTTPException(status_code=500, detail="Error importing gallery")
 
 if __name__ == "__main__":
     import uvicorn
