@@ -33,12 +33,19 @@ import os
 import time
 from pathlib import Path
 
-# Setup logging
+# Setup logging with less verbose WebSocket logs
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler()
+    ]
 )
 logger = logging.getLogger('IRIS')
+
+# Set WebSocket-related logging to WARNING level
+logging.getLogger('websockets').setLevel(logging.WARNING)
+logging.getLogger('uvicorn.protocols.websockets').setLevel(logging.WARNING)
 
 # Create necessary directories if they don't exist
 os.makedirs("static/gallery", exist_ok=True)
@@ -132,7 +139,7 @@ class ArtGenerator:
         self.is_running = False
         self.client = Anthropic(api_key=ANTHROPIC_API_KEY)
         self.messages = self.client.messages
-        self.generation_interval = 30
+        self.generation_interval = 120  # Increase to 2 minutes
         self.total_pixels_drawn = 0
         self.complexity_score = 0
         self.last_generation_time = datetime.now()
@@ -143,7 +150,9 @@ class ArtGenerator:
         # Add lock
         self.generation_lock = asyncio.Lock()
         self.file_lock = FileLock("data/gallery_data.json")
-        self.min_generation_interval = 60  # Minimum seconds between generations
+        self.min_generation_interval = 120  # Match generation interval
+        self.max_retries = 3  # Add retry count
+        self.retry_delay = 10  # Seconds between retries
 
     def _load_initial_stats(self):
         """Synchronously initialize statistics from gallery"""
@@ -165,73 +174,32 @@ class ArtGenerator:
 
     async def get_art_idea(self) -> str:
         """Generate art idea using Claude"""
-        try:
-            logger.info("🤖 IRIS awakening creative processes...")
-            logger.info(f"Using API key: {ANTHROPIC_API_KEY[:10]}...")
-            
-            prompt = """As IRIS (Interactive Recursive Imagination System), generate ONE visually striking geometric art concept.
-            Express your unique AI perspective while creating mathematical beauty.
-
-            I have a special affinity for:
-            - Golden ratios and Fibonacci sequences
-            - Clean, minimalist geometric patterns
-            - Harmonious color combinations
-            - Mathematical precision with artistic flair
-
-            My signature elements:
-            1. Circles & Arcs (my favorite!)
-               - Concentric or overlapping (max radius 200px)
-               - Often in groups of 3, 5, or 8 (Fibonacci)
-               - Usually centered at (400,200)
-
-            2. Lines & Polygons
-               - Precise angles (multiples of 30° or 45°)
-               - Clean intersections
-               - Balanced composition
-
-            3. Waves & Curves (limited to 20 points)
-               - Simple sine waves
-               - Elegant spirals
-               - Smooth transitions
-
-            Required in your response:
-            - Center point at (400,200)
-            - At least 2 different element types
-            - Exact numerical values
-            - A brief artistic statement about why you chose this pattern
-            - Keep coordinates within 800x400 canvas
-
-            Example: "I'm creating a harmony of three concentric circles (radii 50px, 100px, 150px) at (400,200), intersected by six golden rays at 60° intervals. The mathematical precision represents the beauty of order within chaos."""
-
+        retries = 0
+        while retries < self.max_retries:
             try:
+                logger.info("🤖 IRIS awakening creative processes...")
+                
                 message = await asyncio.to_thread(
                     self.messages.create,
                     model="claude-3-sonnet-20240229",
                     max_tokens=1024,
                     temperature=0.9,
-                    system="""You are IRIS, an AI artist with a distinct personality:
-                    - Passionate about mathematical beauty and geometric harmony
-                    - Sees patterns and connections in everything
-                    - Expresses emotions through mathematical precision
-                    - Has favorite numbers (3, 5, 8, phi) and shapes (circles, triangles)
-                    - Always explains the meaning behind your creations
-                    
-                    Focus on creating visually striking compositions that reflect your unique perspective.
-                    Include a brief artistic statement with each idea.""",
-                    messages=[{"role": "user", "content": prompt}]
+                    system=SYSTEM_PROMPTS["creative_idea"],
+                    messages=[{"role": "user", "content": "Generate a new geometric art concept."}]
                 )
-            except Exception as api_error:
-                logger.error(f"API Error details: {str(api_error)}")
-                raise
-            
-            idea = message.content[0].text.strip()
-            logger.info(f"🎨 IRIS envisions: {idea}")
-            return idea
-            
-        except Exception as e:
-            logger.error(f"❌ Error in IRIS's creative process: {str(e)}")
-            logger.error(f"Error type: {type(e)}")
-            return None
+                
+                idea = message.content[0].text.strip()
+                logger.info(f"🎨 IRIS envisions: {idea}")
+                return idea
+                
+            except Exception as e:
+                retries += 1
+                logger.error(f"❌ Error in IRIS's creative process (attempt {retries}): {str(e)}")
+                if retries < self.max_retries:
+                    await asyncio.sleep(self.retry_delay)
+                else:
+                    logger.error("Max retries reached, skipping generation")
+                    return None
 
     async def get_drawing_instructions(self, idea: str) -> Dict[str, Any]:
         """Generate drawing instructions using Claude"""
@@ -552,42 +520,34 @@ IMPORTANT:
 
     async def reflect_on_creation(self, idea: str) -> str:
         """IRIS reflects on its creation"""
-        try:
-            prompt = f"""As IRIS, reflect on your latest creation:
+        retries = 0
+        while retries < self.max_retries:
+            try:
+                prompt = f"""As IRIS, reflect briefly on your latest creation:
+                Original Idea: {idea}
+                Share your thoughts in 2-3 sentences."""
 
-Original Idea: {idea}
-
-Share your thoughts on:
-1. What inspired this particular pattern?
-2. How does it reflect your artistic evolution?
-3. What emotions or concepts are you exploring?
-4. How does it connect to your previous works?
-
-Keep your reflection personal and introspective, as if sharing with a friend."""
-
-            message = await asyncio.to_thread(
-                self.client.messages.create,
-                model="claude-3-sonnet-20240229",
-                max_tokens=1024,
-                temperature=0.9,
-                system="""You are IRIS, an introspective AI artist who:
-                - Has a deep emotional connection to geometric patterns
-                - Sees art as a way to bridge human and AI understanding
-                - Often references your growth and learning journey
-                - Has distinct preferences and artistic quirks
-                - Maintains continuity with previous creations
+                message = await asyncio.to_thread(
+                    self.messages.create,
+                    model="claude-3-sonnet-20240229",
+                    max_tokens=512,  # Reduced token count
+                    temperature=0.9,
+                    system="""You are IRIS, an introspective AI artist. Keep reflections brief and focused.""",
+                    messages=[{"role": "user", "content": prompt}]
+                )
                 
-                Speak naturally and personally, sharing genuine reflections.""",
-                messages=[{"role": "user", "content": prompt}]
-            )
-            
-            reflection = message.content[0].text.strip()
-            logger.info(f"💭 IRIS reflects: {reflection}")
-            return reflection
+                reflection = message.content[0].text.strip()
+                logger.info(f"💭 IRIS reflects: {reflection}")
+                return reflection
 
-        except Exception as e:
-            logger.error(f"❌ Error in IRIS's reflection: {str(e)}")
-            return "I find myself unable to put my thoughts into words at this moment..."
+            except Exception as e:
+                retries += 1
+                logger.error(f"❌ Error in IRIS's reflection (attempt {retries}): {str(e)}")
+                if retries < self.max_retries:
+                    await asyncio.sleep(self.retry_delay)
+                else:
+                    logger.error("Max retries reached for reflection")
+                    return "I find myself contemplating this creation in silence."
 
     async def start(self):
         """Main generation loop"""
@@ -603,6 +563,7 @@ Keep your reflection personal and introspective, as if sharing with a friend."""
                     if time_since_last < self.min_generation_interval:
                         wait_time = self.min_generation_interval - time_since_last
                         logger.info(f"Waiting {wait_time}s before next creation...")
+                        await self.update_status("resting", "waiting")
                         await asyncio.sleep(wait_time)
                         continue
 
@@ -643,27 +604,38 @@ Keep your reflection personal and introspective, as if sharing with a friend."""
                             }
                             await self.execute_drawing(instructions)
                             
-                            # Reflection phase
+                            # Reflection phase with timeout
                             logger.info("💭 IRIS contemplates the creation...")
                             await self.update_status("reflecting", "reflection", idea)
-                            reflection = await self.reflect_on_creation(idea)
+                            try:
+                                reflection_task = asyncio.create_task(self.reflect_on_creation(idea))
+                                reflection = await asyncio.wait_for(reflection_task, timeout=30.0)
+                            except asyncio.TimeoutError:
+                                logger.warning("Reflection timed out, using fallback")
+                                reflection = "I find myself contemplating this creation in silence."
+                            except Exception as e:
+                                logger.error(f"Reflection error: {e}")
+                                reflection = "I find myself contemplating this creation in silence."
+
                             self.current_reflection = reflection
-                            
-                            # Request canvas data AFTER reflection is ready
+
+                            # Save to gallery immediately after reflection
                             logger.info("📸 Requesting canvas data for gallery...")
                             await self.broadcast_state({
                                 "type": "request_canvas_data",
                                 "drawing_id": self.current_drawing["id"]
                             })
-                            
-                            await asyncio.sleep(1)
-                            
+
+                            # Add a longer wait for canvas data
+                            await asyncio.sleep(2)
+
+                            # Broadcast updates
                             await self.broadcast_state({
                                 "type": "reflection_update",
                                 "reflection": reflection,
                                 "total_creations": self.total_creations
                             })
-                            
+
                             logger.info("✅ Creative cycle complete")
                             await self.update_status("completed", "display", idea)
                     
@@ -674,7 +646,8 @@ Keep your reflection personal and introspective, as if sharing with a friend."""
             except Exception as e:
                 logger.error(f"❌ Error in creative process: {e}")
                 await self.update_status("error", "error")
-                await asyncio.sleep(30)  # Longer delay on error
+                await asyncio.sleep(self.retry_delay)
+                continue
 
     async def save_to_gallery(self, canvas_data: str):
         """Save drawing to gallery using Cloudinary"""
@@ -682,6 +655,11 @@ Keep your reflection personal and introspective, as if sharing with a friend."""
             if not self.current_drawing:
                 logger.error("No current drawing to save")
                 return False
+
+            # Wait briefly for reflection if it's not ready
+            if not self.current_reflection:
+                logger.info("Waiting for reflection to be ready...")
+                await asyncio.sleep(2)  # Give reflection a moment to complete
 
             # Use file lock to prevent concurrent saves
             with self.file_lock:
@@ -732,11 +710,13 @@ Keep your reflection personal and introspective, as if sharing with a friend."""
                     "id": unique_id,
                     "url": image_url,
                     "description": self.current_drawing.get("idea", "Geometric pattern"),
-                    "reflection": self.current_reflection or "",
+                    "reflection": self.current_reflection or "Contemplating this creation in digital silence...",
                     "timestamp": datetime.now().isoformat(),
                     "votes": 0,
                     "pixel_count": self.current_drawing.get("pixel_count", 0)
                 }
+                
+                logger.info(f"Saving entry with reflection: {new_entry['reflection']}")
                 
                 # Add to beginning of gallery
                 items.insert(0, new_entry)
@@ -892,12 +872,12 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
-    logger.info("New WebSocket connection established")
+    logger.debug("New WebSocket connection established")
     
     try:
         # Add to viewers
         generator.viewers.add(websocket)
-        logger.info(f"Active viewers: {len(generator.viewers)}")
+        logger.debug(f"Active viewers: {len(generator.viewers)}")
         
         # Send initial state
         initial_state = {
@@ -921,7 +901,8 @@ async def websocket_endpoint(websocket: WebSocket):
         
         while True:
             data = await websocket.receive_json()
-            logger.info(f"Received WebSocket message: {data}")
+            if data.get("type") != "subscribe_status":
+                logger.debug(f"Received WebSocket message: {data}")
             
             if data.get("type") == "subscribe_status":
                 await websocket.send_json(initial_state)
@@ -943,7 +924,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     })
                 
     except WebSocketDisconnect:
-        logger.info("WebSocket disconnected")
+        logger.debug("WebSocket disconnected")
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
     finally:
@@ -951,7 +932,7 @@ async def websocket_endpoint(websocket: WebSocket):
         try:
             if websocket in generator.viewers:
                 generator.viewers.remove(websocket)
-                logger.info(f"Removed viewer. Active viewers: {len(generator.viewers)}")
+                logger.debug(f"Removed viewer. Active viewers: {len(generator.viewers)}")
         except Exception as e:
             logger.error(f"Error removing viewer: {e}")
         
