@@ -46,7 +46,26 @@ os.makedirs("data", exist_ok=True)
 
 # Initialize gallery data file if it doesn't exist
 gallery_file = "data/gallery_data.json"
-if not os.path.exists(gallery_file):
+try:
+    if not os.path.exists("data"):
+        os.makedirs("data")
+    if not os.path.exists(gallery_file):
+        with open(gallery_file, "w") as f:
+            json.dump([], f)
+    else:
+        # Validate existing gallery data
+        with open(gallery_file, "r") as f:
+            try:
+                data = json.load(f)
+                if not isinstance(data, list):
+                    logger.warning("Invalid gallery data format, resetting...")
+                    json.dump([], f)
+            except json.JSONDecodeError:
+                logger.warning("Corrupted gallery data, resetting...")
+                json.dump([], f)
+except Exception as e:
+    logger.error(f"Error initializing gallery file: {e}")
+    # Create empty gallery as fallback
     with open(gallery_file, "w") as f:
         json.dump([], f)
 
@@ -664,70 +683,65 @@ Keep your reflection personal and introspective, as if sharing with a friend."""
                 logger.error("No current drawing to save")
                 return False
 
-            # Use context manager for the lock
-            with self.file_lock:
-                # Generate unique ID with timestamp and random string
-                unique_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+            # Process canvas data and upload
+            logger.info("Processing canvas data for upload...")
+            img_data = canvas_data.split(',')[1]
+            img_bytes = base64.b64decode(img_data)
+            
+            # Generate unique ID
+            unique_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            # Upload to Cloudinary
+            logger.info("Uploading to Cloudinary...")
+            upload_result = upload(
+                img_bytes,
+                folder="iris_gallery",
+                public_id=f"drawing_{unique_id}",
+                resource_type="image"
+            )
+            
+            image_url = upload_result.get('secure_url')
+            if not image_url:
+                logger.error("No URL in upload result")
+                return False
                 
-                # Load existing gallery data
-                gallery_file = "data/gallery_data.json"
-                existing_items = []
-                if os.path.exists(gallery_file):
-                    with open(gallery_file, "r") as f:
-                        existing_items = json.load(f)
+            # Create new entry
+            new_entry = {
+                "id": unique_id,
+                "url": image_url,
+                "description": self.current_drawing.get("idea", "Geometric pattern"),
+                "reflection": self.current_reflection or "",
+                "timestamp": datetime.now().isoformat(),
+                "votes": 0,
+                "pixel_count": self.current_drawing.get("pixel_count", 0)
+            }
+            
+            # Save to gallery file
+            gallery_file = "data/gallery_data.json"
+            try:
+                with open(gallery_file, "r") as f:
+                    items = json.load(f)
+            except (FileNotFoundError, json.JSONDecodeError):
+                items = []
                 
-                # Process canvas data and upload
-                logger.info("Processing canvas data for upload...")
-                img_data = canvas_data.split(',')[1]
-                img_bytes = base64.b64decode(img_data)
+            items.insert(0, new_entry)
+            
+            with open(gallery_file, "w") as f:
+                json.dump(items, f, indent=2)
                 
-                # Upload to Cloudinary
-                logger.info("Uploading to Cloudinary...")
-                upload_result = upload(
-                    img_bytes,
-                    folder="iris_gallery",
-                    public_id=f"drawing_{unique_id}",
-                    resource_type="image"
-                )
-                
-                image_url = upload_result.get('secure_url')
-                if not image_url:
-                    logger.error("No URL in upload result")
-                    return False
-                
-                # Create new entry
-                new_entry = {
-                    "id": unique_id,
-                    "url": image_url,
-                    "description": self.current_drawing.get("idea", "Geometric pattern"),
-                    "reflection": self.current_reflection or "",
-                    "timestamp": datetime.now().isoformat(),
-                    "votes": 0,
-                    "pixel_count": self.current_drawing.get("pixel_count", 0)
-                }
-                
-                logger.info(f"Created new gallery entry: {new_entry}")
-                
-                # Add to beginning of gallery
-                existing_items.insert(0, new_entry)
-                
-                # Save updated gallery
-                with open(gallery_file, "w") as f:
-                    json.dump(existing_items, f, indent=2)
-                
-                # Broadcast update to all clients
-                await self.broadcast_state({
-                    "type": "gallery_update",
-                    "action": "new_item",
-                    "item": new_entry
-                })
-                
-                logger.info(f"Successfully saved artwork {unique_id} to gallery")
-                return True
+            logger.info(f"Successfully saved artwork {unique_id} to gallery")
+            
+            # Broadcast update
+            await self.broadcast_state({
+                "type": "gallery_update",
+                "action": "new_item",
+                "item": new_entry
+            })
+            
+            return True
                 
         except Exception as e:
             logger.error(f"Error in save_to_gallery: {e}")
-            logger.error(f"Full error: {e}", exc_info=True)
             return False
 
     def _calculate_circle_points(self, center_x: float, center_y: float, radius: float, points: int = 32) -> List[List[float]]:
