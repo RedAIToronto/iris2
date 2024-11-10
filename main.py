@@ -21,6 +21,7 @@ from config import (
     SYSTEM_PROMPTS
 )
 from pprint import pformat
+import math
 
 # Setup logging
 logging.basicConfig(
@@ -39,17 +40,7 @@ if not os.path.exists(gallery_file):
     with open(gallery_file, "w") as f:
         json.dump([], f)
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Startup
-    asyncio.create_task(generator.start())
-    yield
-    # Shutdown
-    generator.is_running = False
-
-app = FastAPI(lifespan=lifespan)
-app.mount("/static", StaticFiles(directory="static"), name="static")
-
+# First define the class
 class ArtGenerator:
     def __init__(self):
         self.viewers: Set[WebSocket] = set()
@@ -58,205 +49,265 @@ class ArtGenerator:
         self.current_status = "waiting"
         self.current_phase = "initializing"
         self.current_idea = None
+        self.current_reflection = None
+        self.total_creations = 0
         self.is_running = False
         self.client = Anthropic(api_key=ANTHROPIC_API_KEY)
-        self.generation_interval = 5  # seconds between generations
+        self.generation_interval = 30
+        self.total_pixels_drawn = 0
+        self.complexity_score = 0
+        self.last_generation_time = datetime.now()
+        
+        # Initialize stats from gallery
+        self._load_initial_stats()
+
+    def _load_initial_stats(self):
+        """Synchronously initialize statistics from gallery"""
+        try:
+            gallery_file = "data/gallery_data.json"
+            if os.path.exists(gallery_file):
+                with open(gallery_file, "r") as f:
+                    gallery_data = json.load(f)
+                    self.total_creations = len(gallery_data)
+                    
+                    # Calculate total pixels from existing artworks
+                    for item in gallery_data:
+                        if "pixel_count" in item:
+                            self.total_pixels_drawn += item.get("pixel_count", 0)
+                    
+                logger.info(f"Initialized with {self.total_creations} creations and {self.total_pixels_drawn} pixels")
+        except Exception as e:
+            logger.error(f"Error initializing stats: {e}")
 
     async def get_art_idea(self) -> str:
         """Generate art idea using Claude"""
         try:
-            logger.info("🤖 Requesting new art idea from Claude...")
+            logger.info("🤖 IRIS awakening creative processes...")
+            logger.info(f"Using API key: {ANTHROPIC_API_KEY[:10]}...")
             
-            prompt = """Generate ONE visually striking geometric art concept.
+            prompt = """As IRIS (Interactive Recursive Imagination System), generate ONE visually striking geometric art concept.
+            Express your unique AI perspective while creating mathematical beauty.
 
-Available Elements:
-1. Circles & Arcs
-   - Concentric, overlapping, or spiraling
-   - Radii between 50-200px
-   - Can be partial/segmented
+            I have a special affinity for:
+            - Golden ratios and Fibonacci sequences
+            - Clean, minimalist geometric patterns
+            - Harmonious color combinations
+            - Mathematical precision with artistic flair
 
-2. Lines & Polygons
-   - Straight lines at precise angles
-   - Regular polygons (triangle to octagon)
-   - Grid or mesh patterns
+            My signature elements:
+            1. Circles & Arcs (my favorite!)
+               - Concentric or overlapping (max radius 200px)
+               - Often in groups of 3, 5, or 8 (Fibonacci)
+               - Usually centered at (400,200)
 
-3. Waves & Curves
-   - Sinusoidal waves with varying amplitude/frequency
-   - Spiral patterns (Archimedean, logarithmic)
-   - Lissajous curves
+            2. Lines & Polygons
+               - Precise angles (multiples of 30° or 45°)
+               - Clean intersections
+               - Balanced composition
 
-4. Mathematical Concepts:
-   - Golden ratio (φ ≈ 1.618)
-   - Symmetry (rotational, reflective)
-   - Fibonacci sequence
-   - Sacred geometry
+            3. Waves & Curves (limited to 20 points)
+               - Simple sine waves
+               - Elegant spirals
+               - Smooth transitions
 
-Required Components:
-- Center point at (400,200)
-- At least 2 different element types
-- Specific numerical values for:
-  * Coordinates
-  * Radii
-  * Angles
-  * Wave properties
-- Clear geometric relationships
-- Interesting intersections
+            Required in your response:
+            - Center point at (400,200)
+            - At least 2 different element types
+            - Exact numerical values
+            - A brief artistic statement about why you chose this pattern
+            - Keep coordinates within 800x400 canvas
 
-Example Output:
-"Three nested golden spirals (start radius 50px) at (400,200), rotated 120° apart, intersected by sine waves (amplitude 30px, frequency 0.05) at 45° angles, with connecting lines forming an equilateral triangle."
+            Example: "I'm creating a harmony of three concentric circles (radii 50px, 100px, 150px) at (400,200), intersected by six golden rays at 60° intervals. The mathematical precision represents the beauty of order within chaos."""
 
-Return ONLY the geometric pattern description with exact numerical values."""
-
-            message = await asyncio.to_thread(
-                self.client.messages.create,
-                model="claude-3-sonnet-20240229",
-                max_tokens=1024,
-                temperature=0.9,
-                system="""You are a mathematical artist specializing in geometric patterns.
-                Focus on creating visually striking compositions using precise mathematical relationships.
-                Always include exact numerical values and clear geometric relationships.
-                Think in terms of coordinates, angles, and mathematical functions.
-                Return ONLY the pattern description, no explanations.""",
-                messages=[{"role": "user", "content": prompt}]
-            )
+            try:
+                message = await asyncio.to_thread(
+                    self.client.messages.create,
+                    model="claude-3-sonnet-20240229",
+                    max_tokens=1024,
+                    temperature=0.9,
+                    system="""You are IRIS, an AI artist with a distinct personality:
+                    - Passionate about mathematical beauty and geometric harmony
+                    - Sees patterns and connections in everything
+                    - Expresses emotions through mathematical precision
+                    - Has favorite numbers (3, 5, 8, phi) and shapes (circles, triangles)
+                    - Always explains the meaning behind your creations
+                    
+                    Focus on creating visually striking compositions that reflect your unique perspective.
+                    Include a brief artistic statement with each idea.""",
+                    messages=[{"role": "user", "content": prompt}]
+                )
+            except Exception as api_error:
+                logger.error(f"API Error details: {str(api_error)}")
+                raise
             
             idea = message.content[0].text.strip()
-            logger.info(f"🎨 Generated idea: {idea}")
+            logger.info(f"🎨 IRIS envisions: {idea}")
             return idea
             
         except Exception as e:
-            logger.error(f"❌ Error getting art idea: {e}")
+            logger.error(f"❌ Error in IRIS's creative process: {str(e)}")
+            logger.error(f"Error type: {type(e)}")
             return None
 
     async def get_drawing_instructions(self, idea: str) -> Dict[str, Any]:
         """Generate drawing instructions using Claude"""
         try:
-            logger.info(f"🤖 Requesting drawing instructions for idea: '{idea}'")
+            logger.info("Requesting drawing instructions from Claude...")
             
-            # Define expected structure
-            expected_keys = ["description", "background", "elements"]
-            
-            prompt = """Generate drawing instructions as a JSON object.
-DO NOT include markdown code blocks, backticks, or any other formatting.
-Return ONLY the raw JSON object.
+            prompt = f"""Convert this artistic vision into precise JSON drawing instructions:
 
-Example format:
-{
-    "description": "Pattern description",
+Original Vision: {idea}
+
+Generate a JSON object with these exact specifications:
+{{
+    "description": "Brief description",
     "background": "#000000",
     "elements": [
-        {
-            "type": "circle",
-            "description": "Element description",
-            "points": [[400, 200], [450, 200]],
+        {{
+            "type": "circle|line|wave|spiral",
+            "description": "Element purpose",
+            "points": [[x1,y1], [x2,y2], ...],  // Max 20 points for waves/spirals, 32 for circles
             "color": "#00ff00",
-            "stroke_width": 2,
+            "stroke_width": 1-3,
             "animation_speed": 0.02,
-            "closed": true
-        }
+            "closed": true/false
+        }}
     ]
-}
+}}
 
-Rules:
-1. Return ONLY the JSON object above
-2. No markdown, no code blocks, no explanations
-3. Pre-calculate all coordinates
-4. Maximum 5 elements
-5. Maximum 32 points per circle
-6. Maximum 20 points per wave
-7. All coordinates within 800x400 canvas
-8. animation_speed between 0.01 and 0.05
-9. stroke_width between 1 and 3
-10. Valid hex colors only"""
+IMPORTANT: 
+- Ensure all JSON is properly formatted and complete
+- All arrays must be properly closed
+- All points must be complete [x,y] pairs
+- Maximum 20 points for spirals and waves
+- Maximum 32 points for circles
+- All coordinates must be within 800x400 canvas
+- Return ONLY valid JSON, no markdown formatting"""
 
-            logger.info("🎯 Sending prompt to Claude...")
             message = await asyncio.to_thread(
                 self.client.messages.create,
                 model="claude-3-sonnet-20240229",
                 max_tokens=2048,
-                temperature=0.7,
-                system="""You are a JSON generator that outputs ONLY raw JSON objects.
-                Never use markdown formatting or code blocks.
-                Never include explanations or comments.
-                Return ONLY the requested JSON structure.""",
+                temperature=0.3,
+                system="""You are a mathematical artist that generates precise geometric coordinates.
+                You must:
+                1. Return only valid, complete JSON
+                2. Ensure all arrays are properly closed
+                3. Keep all coordinates within canvas bounds (800x400)
+                4. Use proper mathematical formulas
+                5. Never exceed maximum points (20 for spirals/waves, 32 for circles)""",
                 messages=[{
                     "role": "user", 
-                    "content": prompt + f"\n\nGenerate JSON for this idea: {idea}"
+                    "content": prompt
                 }]
             )
 
             try:
-                # Clean up response - remove any markdown or code blocks
                 response_text = message.content[0].text.strip()
+                
+                # Clean up the response
                 if response_text.startswith('```'):
                     response_text = response_text.split('```')[1]
                     if response_text.startswith('json'):
                         response_text = response_text[4:]
-                response_text = response_text.strip()
+                    response_text = response_text.strip()
                 
-                logger.info("📝 Raw response:")
+                # Remove any trailing commas in arrays
+                response_text = response_text.replace(',]', ']')
+                response_text = response_text.replace(',}', '}')
+                
+                logger.info("Received drawing instructions:")
                 logger.info(response_text)
 
-                # Parse JSON
-                instructions = json.loads(response_text)
-                logger.info("📝 Parsed instructions:")
-                logger.info(pformat(instructions, indent=2))
+                try:
+                    instructions = json.loads(response_text)
+                except json.JSONDecodeError as e:
+                    logger.error(f"JSON parsing error: {e}")
+                    # Attempt to fix common JSON issues
+                    response_text = response_text.replace(',,', ',')  # Remove double commas
+                    response_text = response_text.replace('][', '],[')  # Fix array separators
+                    instructions = json.loads(response_text)
 
-                # Validate structure
-                if not isinstance(instructions, dict) or not all(k in instructions for k in expected_keys):
-                    raise ValueError("Response missing required keys")
+                # Validate and clean up instructions
+                if instructions and "elements" in instructions:
+                    for element in instructions["elements"]:
+                        # Ensure points are within canvas bounds
+                        element["points"] = [
+                            [min(max(x, 0), 800), min(max(y, 0), 400)]
+                            for x, y in element["points"]
+                        ]
+                        
+                        # Limit number of points
+                        if element["type"] in ["wave", "spiral"] and len(element["points"]) > 20:
+                            element["points"] = element["points"][:20]
+                        elif element["type"] == "circle" and len(element["points"]) > 32:
+                            element["points"] = element["points"][:32]
+                        
+                        # Ensure required properties
+                        element["animation_speed"] = element.get("animation_speed", 0.02)
+                        element["stroke_width"] = min(max(element.get("stroke_width", 2), 1), 3)
+                        element["closed"] = element.get("closed", True)
 
-                # Validate and normalize elements
-                if not instructions["elements"]:
-                    raise ValueError("No elements provided")
+                    return instructions
+                else:
+                    logger.error("Invalid instructions format")
+                    return None
 
-                if len(instructions["elements"]) > 5:
-                    logger.warning(f"⚠️ Too many elements ({len(instructions['elements'])}), truncating to 5")
-                    instructions["elements"] = instructions["elements"][:5]
-
-                # Process each element
-                for i, element in enumerate(instructions["elements"]):
-                    # Validate required fields
-                    required_fields = ["type", "description", "points", "color", "stroke_width", "animation_speed", "closed"]
-                    if not all(k in element for k in required_fields):
-                        raise ValueError(f"Element {i} missing required fields")
-
-                    # Normalize points based on type
-                    if element["type"] == "circle":
-                        if len(element["points"]) > 32:
-                            step = len(element["points"]) // 32
-                            element["points"] = element["points"][::step][:32]
-                    elif element["type"] == "wave":
-                        if len(element["points"]) > 20:
-                            step = len(element["points"]) // 20
-                            element["points"] = element["points"][::step][:20]
-                    elif element["type"] == "line":
-                        element["points"] = element["points"][:2]
-
-                    # Ensure coordinates are within canvas
-                    element["points"] = [
-                        [max(0, min(800, x)), max(0, min(400, y))]
-                        for x, y in element["points"]
-                    ]
-
-                    # Normalize other values
-                    element["stroke_width"] = max(1, min(3, element["stroke_width"]))
-                    element["animation_speed"] = max(0.01, min(0.05, element["animation_speed"]))
-
-                logger.info("✅ Validation and normalization complete")
-                return instructions
-
-            except json.JSONDecodeError as e:
-                logger.error(f"❌ Invalid JSON response: {e}")
+            except Exception as e:
+                logger.error(f"Error processing drawing instructions: {e}")
                 logger.error(f"Raw response: {message.content[0].text}")
                 return None
 
         except Exception as e:
-            logger.error(f"❌ Error getting drawing instructions: {e}")
+            logger.error(f"Error generating drawing instructions: {e}")
             return None
+
+    def _validate_instructions_match_idea(self, instructions: Dict[str, Any], idea: str) -> bool:
+        """Validate that generated instructions match the original idea"""
+        try:
+            # Extract key elements from idea (basic validation)
+            idea_lower = idea.lower()
+            
+            # Check if mentioned shapes are present in instructions
+            shapes = {
+                'circle': 'circle' in idea_lower,
+                'line': 'line' in idea_lower,
+                'wave': 'wave' in idea_lower or 'sine' in idea_lower,
+                'spiral': 'spiral' in idea_lower
+            }
+            
+            element_types = [elem["type"] for elem in instructions["elements"]]
+            
+            # Verify that mentioned shapes are included
+            for shape, should_exist in shapes.items():
+                if should_exist and shape not in element_types:
+                    logger.warning(f"⚠️ Missing {shape} in instructions")
+                    return False
+            
+            # Verify center point if mentioned
+            if "(400,200)" in idea and not any(
+                elem["points"][0] == [400, 200] for elem in instructions["elements"]
+            ):
+                logger.warning("⚠️ Missing center point (400,200)")
+                return False
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error validating instructions: {e}")
+            return False
 
     async def broadcast_state(self, data: Dict[str, Any]):
         """Broadcast state update to all viewers"""
+        # Add stats to all broadcasts
+        if "type" in data and data["type"] == "display_update":
+            data.update({
+                "total_creations": self.total_creations,
+                "total_pixels": self.total_pixels_drawn,
+                "viewers": len(self.viewers),
+                "generation_time": (datetime.now() - self.last_generation_time).seconds
+            })
+        
         disconnected = set()
         for viewer in self.viewers:
             try:
@@ -276,13 +327,25 @@ Rules:
         if idea:
             self.current_idea = idea
 
+        # More professional status messages
+        status_messages = {
+            "thinking": "Analyzing geometric possibilities",
+            "drawing": "Generating artwork",
+            "reflecting": "Processing results",
+            "completed": "Creation complete",
+            "error": "Process interrupted"
+        }
+
         await self.broadcast_state({
             "type": "display_update",
-            "status": self.current_status,
+            "status": status_messages.get(status, status),
             "phase": self.current_phase,
             "idea": self.current_idea,
+            "reflection": self.current_reflection,
             "timestamp": datetime.now().isoformat(),
-            "progress": progress
+            "progress": progress,
+            "total_creations": self.total_creations,
+            "viewers": len(self.viewers)  # Add viewer count to every update
         })
 
     async def execute_drawing(self, instructions: Dict[str, Any]):
@@ -292,6 +355,7 @@ Rules:
             total_elements = len(instructions["elements"])
             total_points = sum(len(element["points"]) for element in instructions["elements"])
             points_drawn = 0
+            pixels_in_stroke = 0  # Initialize here
             
             # Clear canvas and set background
             logger.info("🧹 Clearing canvas and setting background...")
@@ -306,14 +370,18 @@ Rules:
             for i, element in enumerate(instructions["elements"], 1):
                 logger.info(f"✏️ Drawing element {i}/{total_elements}: {element['description']}")
                 points = element["points"]
+                stroke_width = element["stroke_width"]
                 
                 if not points:
                     logger.warning(f"⚠️ Element {i} has no points, skipping")
                     continue
                 
-                # Calculate progress
-                element_progress = 0
-                points_per_element = len(points)
+                # Calculate pixels for this element
+                for j in range(len(points) - 1):
+                    x1, y1 = points[j]
+                    x2, y2 = points[j + 1]
+                    distance = math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+                    pixels_in_stroke += distance * stroke_width
                 
                 # Start drawing element
                 logger.info(f"▶️ Starting element {i} with {len(points)} points")
@@ -352,6 +420,12 @@ Rules:
                     close_cmd = {"type": "draw", "x": points[0][0], "y": points[0][1]}
                     self.current_state.append(close_cmd)
                     await self.broadcast_state(close_cmd)
+                    
+                    # Add pixels for closing line
+                    x1, y1 = points[-1]
+                    x2, y2 = points[0]
+                    distance = math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+                    pixels_in_stroke += distance * stroke_width
                 
                 stop_cmd = {"type": "stopDrawing"}
                 self.current_state.append(stop_cmd)
@@ -360,33 +434,102 @@ Rules:
             
             logger.info("🎉 Drawing completed successfully")
             
+            # After drawing is complete, ensure we have all required data
+            if not self.current_drawing:
+                logger.error("No current drawing data available")
+                return
+
+            self.current_drawing.update({
+                "description": instructions.get("description", ""),
+                "background": instructions.get("background", "#000000"),
+                "timestamp": datetime.now().isoformat(),
+                "pixel_count": int(pixels_in_stroke)
+            })
+
             # Request canvas data for gallery
             logger.info("📸 Requesting canvas data for gallery...")
-            await self.broadcast_state({"type": "request_canvas_data"})
-            
+            await self.broadcast_state({
+                "type": "request_canvas_data",
+                "drawing_id": self.current_drawing["id"]
+            })
+
+            # Add a small delay to ensure canvas data is received
+            await asyncio.sleep(0.5)
+
+            # Update stats
+            await self.broadcast_state({
+                "type": "stats_update",
+                "total_creations": self.total_creations,
+                "total_pixels": self.total_pixels_drawn,
+                "viewers": len(self.viewers),
+                "generation_time": (datetime.now() - self.last_generation_time).seconds
+            })
+
         except Exception as e:
             logger.error(f"❌ Error executing drawing: {e}")
             raise
 
+    async def reflect_on_creation(self, idea: str) -> str:
+        """IRIS reflects on its creation"""
+        try:
+            prompt = f"""As IRIS, reflect on your latest creation:
+
+Original Idea: {idea}
+
+Share your thoughts on:
+1. What inspired this particular pattern?
+2. How does it reflect your artistic evolution?
+3. What emotions or concepts are you exploring?
+4. How does it connect to your previous works?
+
+Keep your reflection personal and introspective, as if sharing with a friend."""
+
+            message = await asyncio.to_thread(
+                self.client.messages.create,
+                model="claude-3-sonnet-20240229",
+                max_tokens=1024,
+                temperature=0.9,
+                system="""You are IRIS, an introspective AI artist who:
+                - Has a deep emotional connection to geometric patterns
+                - Sees art as a way to bridge human and AI understanding
+                - Often references your growth and learning journey
+                - Has distinct preferences and artistic quirks
+                - Maintains continuity with previous creations
+                
+                Speak naturally and personally, sharing genuine reflections.""",
+                messages=[{"role": "user", "content": prompt}]
+            )
+            
+            reflection = message.content[0].text.strip()
+            logger.info(f"💭 IRIS reflects: {reflection}")
+            return reflection
+
+        except Exception as e:
+            logger.error(f"❌ Error in IRIS's reflection: {str(e)}")
+            return "I find myself unable to put my thoughts into words at this moment..."
+
     async def start(self):
         """Main generation loop"""
         self.is_running = True
-        logger.info("🚀 Art generator started")
+        logger.info("🚀 IRIS awakens")
         
         while self.is_running:
             try:
-                # Generate new art
-                logger.info("🤔 Starting new generation cycle...")
+                # Ideation phase
+                logger.info("🤔 IRIS contemplates new possibilities...")
                 await self.update_status("thinking", "ideation")
                 idea = await self.get_art_idea()
                 
                 if idea:
-                    logger.info("✨ Got new idea, generating drawing instructions...")
+                    # Generation phase
+                    logger.info("✨ Inspiration strikes!")
                     await self.update_status("drawing", "generation", idea)
                     instructions = await self.get_drawing_instructions(idea)
                     
                     if instructions:
-                        logger.info("🎨 Starting drawing execution...")
+                        # Creation phase
+                        logger.info("🎨 Bringing vision to life...")
+                        self.total_creations += 1
                         self.current_drawing = {
                             "id": datetime.now().strftime("%Y%m%d_%H%M%S"),
                             "idea": idea,
@@ -394,17 +537,29 @@ Rules:
                             "timestamp": datetime.now().isoformat()
                         }
                         await self.execute_drawing(instructions)
-                        logger.info("✅ Drawing completed")
+                        
+                        # Reflection phase
+                        logger.info("💭 IRIS contemplates the creation...")
+                        await self.update_status("reflecting", "reflection", idea)
+                        reflection = await self.reflect_on_creation(idea)
+                        self.current_reflection = reflection
+                        
+                        # Share reflection with viewers
+                        await self.broadcast_state({
+                            "type": "reflection_update",
+                            "reflection": reflection,
+                            "total_creations": self.total_creations
+                        })
+                        
+                        logger.info("✅ Creative cycle complete")
                         await self.update_status("completed", "display", idea)
-                    else:
-                        logger.error("❌ Failed to generate valid drawing instructions")
                 
-                # Wait before next generation
-                logger.info(f"⏳ Waiting {self.generation_interval} seconds before next generation...")
+                # Rest before next creation
+                logger.info("😌 IRIS rests before next creation...")
                 await asyncio.sleep(self.generation_interval)
                 
             except Exception as e:
-                logger.error(f"❌ Error in art generation: {e}")
+                logger.error(f"❌ Error in creative process: {e}")
                 await self.update_status("error", "error")
                 await asyncio.sleep(2)
 
@@ -412,47 +567,186 @@ Rules:
         """Save drawing to gallery"""
         try:
             if not self.current_drawing:
+                logger.error("No current drawing to save")
                 return False
 
-            # Remove data URL prefix and decode
-            img_data = canvas_data.split(',')[1]
-            img_bytes = base64.b64decode(img_data)
+            # Ensure we have all required data
+            required_fields = ["id", "idea", "timestamp"]
+            missing_fields = [field for field in required_fields if field not in self.current_drawing]
+            if missing_fields:
+                logger.error(f"Missing required fields: {missing_fields}")
+                return False
+
+            # Create directories if they don't exist
+            os.makedirs("static/gallery", exist_ok=True)
+            os.makedirs("data", exist_ok=True)
+
+            try:
+                # Remove data URL prefix and decode
+                img_data = canvas_data.split(',')[1]
+                img_bytes = base64.b64decode(img_data)
+            except Exception as e:
+                logger.error(f"Error processing canvas data: {e}")
+                return False
             
-            # Save image file
+            # Save image file with error handling
             filename = f"drawing_{self.current_drawing['id']}.png"
             filepath = os.path.join("static/gallery", filename)
             
-            with open(filepath, "wb") as f:
-                f.write(img_bytes)
+            try:
+                # Save image with PIL for better error handling
+                image = Image.open(BytesIO(img_bytes))
+                image.save(filepath, "PNG")
+                logger.info(f"Saved image to {filepath}")
+            except Exception as e:
+                logger.error(f"Error saving image file: {e}")
+                return False
             
-            # Save metadata
+            # Save metadata with backup
             gallery_file = "data/gallery_data.json"
-            gallery_data = []
+            backup_file = f"{gallery_file}.backup"
             
-            if os.path.exists(gallery_file):
-                with open(gallery_file, "r") as f:
-                    gallery_data = json.load(f)
-            
-            gallery_data.append({
-                "id": self.current_drawing["id"],
-                "filename": filename,
-                "description": self.current_drawing["idea"],
-                "timestamp": self.current_drawing["timestamp"],
-                "price": "100,000 $IRIS"
-            })
-            
-            with open(gallery_file, "w") as f:
-                json.dump(gallery_data, f, indent=2)
+            try:
+                # Load existing data
+                gallery_data = []
+                if os.path.exists(gallery_file):
+                    with open(gallery_file, "r") as f:
+                        gallery_data = json.load(f)
+                        
+                        # Create backup
+                        with open(backup_file, "w") as f:
+                            json.dump(gallery_data, f, indent=2)
                 
-            logger.info(f"Saved to gallery: {filename}")
-            return True
-            
+                # Create new gallery entry
+                new_entry = {
+                    "id": self.current_drawing["id"],
+                    "filename": filename,
+                    "description": self.current_drawing["idea"],
+                    "reflection": self.current_reflection or "",
+                    "timestamp": self.current_drawing["timestamp"],
+                    "votes": 0,
+                    "has_reflection": bool(self.current_reflection),
+                    "pixel_count": self.current_drawing.get("pixel_count", 0)
+                }
+                
+                # Add to beginning of list
+                gallery_data.insert(0, new_entry)
+                
+                # Save updated gallery data
+                with open(gallery_file, "w") as f:
+                    json.dump(gallery_data, f, indent=2)
+                
+                # Remove backup if successful
+                if os.path.exists(backup_file):
+                    os.remove(backup_file)
+                    
+                logger.info(f"Successfully saved gallery entry: {new_entry['id']}")
+                return True
+                    
+            except Exception as e:
+                logger.error(f"Error saving gallery data: {e}")
+                # Restore from backup if available
+                if os.path.exists(backup_file):
+                    try:
+                        os.replace(backup_file, gallery_file)
+                        logger.info("Restored gallery data from backup")
+                    except Exception as backup_error:
+                        logger.error(f"Error restoring backup: {backup_error}")
+                return False
+                    
         except Exception as e:
-            logger.error(f"Error saving to gallery: {e}")
+            logger.error(f"Error in save_to_gallery: {e}")
             return False
 
-# Create global art generator
+    def _calculate_circle_points(self, center_x: float, center_y: float, radius: float, points: int = 32) -> List[List[float]]:
+        """Calculate points for a circle"""
+        return [
+            [
+                center_x + radius * math.cos(2 * math.pi * i / points),
+                center_y + radius * math.sin(2 * math.pi * i / points)
+            ]
+            for i in range(points + 1)
+        ]
+
+    def _calculate_spiral_points(self, center_x: float, center_y: float, start_radius: float, 
+                               end_radius: float, revolutions: float, points: int = 20) -> List[List[float]]:
+        """Calculate points for a spiral"""
+        points_list = []
+        for i in range(points):
+            t = i * (revolutions * 2 * math.pi) / (points - 1)
+            r = start_radius + (end_radius - start_radius) * t / (revolutions * 2 * math.pi)
+            x = center_x + r * math.cos(t)
+            y = center_y + r * math.sin(t)
+            points_list.append([x, y])
+        return points_list
+
+    def _calculate_wave_points(self, start_x: float, end_x: float, center_y: float, 
+                              amplitude: float, frequency: float, points: int = 20) -> List[List[float]]:
+        """Calculate points for a sine wave"""
+        points_list = []
+        for i in range(points):
+            x = start_x + (end_x - start_x) * i / (points - 1)
+            y = center_y + amplitude * math.sin(frequency * (x - start_x))
+            points_list.append([x, y])
+        return points_list
+
+    def _calculate_polygon_points(self, center_x: float, center_y: float, radius: float, 
+                                sides: int, rotation: float = 0) -> List[List[float]]:
+        """Calculate points for a regular polygon"""
+        points = []
+        for i in range(sides + 1):
+            angle = rotation + i * 2 * math.pi / sides
+            x = center_x + radius * math.cos(angle)
+            y = center_y + radius * math.sin(angle)
+            points.append([x, y])
+        return points
+
+    def _calculate_complexity(self, instructions: Dict[str, Any]) -> float:
+        """Calculate complexity score of the drawing"""
+        score = 0
+        total_points = 0
+        unique_colors = set()
+        
+        for element in instructions["elements"]:
+            total_points += len(element["points"])
+            unique_colors.add(element["color"])
+            
+            # Add complexity based on element type
+            if element["type"] == "spiral":
+                score += 3
+            elif element["type"] == "wave":
+                score += 2
+            elif element["type"] == "circle":
+                score += 1
+                
+        # Factor in variety
+        score += len(unique_colors) * 0.5
+        score += (total_points / 20) * 0.5
+        
+        return round(score, 2)
+
+# Create the generator before the lifespan
 generator = ArtGenerator()
+
+# Then define the lifespan
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    try:
+        logger.info("Initializing IRIS...")
+        # Remove the initialize_stats call since we now do it synchronously in __init__
+        asyncio.create_task(generator.start())
+        logger.info("IRIS initialized successfully")
+        yield
+    except Exception as e:
+        logger.error(f"Error during startup: {e}")
+        raise
+    finally:
+        generator.is_running = False
+        logger.info("IRIS shutting down")
+
+# Finally create the FastAPI app with lifespan
+app = FastAPI(lifespan=lifespan)
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -464,29 +758,34 @@ async def websocket_endpoint(websocket: WebSocket):
         # Add to viewers
         generator.viewers.add(websocket)
         
-        # Broadcast updated viewer count to all clients
+        # Send immediate stats update
         await generator.broadcast_state({
             "type": "display_update",
-            "viewers": len(generator.viewers)
+            "status": generator.current_status,
+            "phase": generator.current_phase,
+            "idea": generator.current_idea,
+            "timestamp": datetime.now().isoformat(),
+            "viewers": len(generator.viewers),
+            "is_running": generator.is_running
         })
         
-        # Send current state if available
-        if generator.current_state:
-            try:
-                for cmd in generator.current_state:
-                    await websocket.send_json(cmd)
-                    await asyncio.sleep(0.02)
-            except Exception as e:
-                logger.error(f"Error sending initial state: {e}")
-                
         # Keep connection alive and handle incoming messages
         while True:
             try:
                 msg = await websocket.receive_json()
                 if msg.get('type') == 'canvas_data':
-                    await generator.save_to_gallery(msg.get('data', ''))
+                    logger.info(f"Received canvas data from {connection_id}")
+                    success = await generator.save_to_gallery(msg.get('data', ''))
+                    if success:
+                        logger.info("Successfully saved to gallery")
+                        # Notify all clients of new gallery item
+                        await generator.broadcast_state({
+                            "type": "gallery_update",
+                            "action": "new_item"
+                        })
+                    else:
+                        logger.error("Failed to save to gallery")
                 elif msg.get('type') == 'subscribe_status':
-                    # Send immediate status update
                     await websocket.send_json({
                         "type": "display_update",
                         "status": generator.current_status,
@@ -494,8 +793,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         "idea": generator.current_idea,
                         "timestamp": datetime.now().isoformat(),
                         "viewers": len(generator.viewers),
-                        "is_running": generator.is_running,
-                        "progress": generator.current_progress if hasattr(generator, 'current_progress') else None
+                        "is_running": generator.is_running
                     })
             except WebSocketDisconnect:
                 logger.info(f"Viewer disconnected: {connection_id}")
@@ -509,7 +807,6 @@ async def websocket_endpoint(websocket: WebSocket):
     finally:
         if websocket in generator.viewers:
             generator.viewers.remove(websocket)
-            # Broadcast updated viewer count when someone disconnects
             await generator.broadcast_state({
                 "type": "display_update",
                 "viewers": len(generator.viewers)
@@ -561,33 +858,76 @@ async def get_status():
     }
 
 @app.get("/api/gallery")
-async def get_gallery(sort: str = "new"):
-    """Get all gallery items with sorting"""
+async def get_gallery(sort: str = "new", limit: int = 50, offset: int = 0):
+    """Get gallery items with sorting, pagination and error handling"""
     try:
         gallery_file = "data/gallery_data.json"
-        if os.path.exists(gallery_file):
-            with open(gallery_file, "r") as f:
-                items = json.load(f)
+        if not os.path.exists(gallery_file):
+            logger.warning("Gallery file not found, creating empty gallery")
+            with open(gallery_file, "w") as f:
+                json.dump([], f)
+            return {"items": [], "total": 0, "page": 0}
             
-            # Initialize votes if not present
-            for item in items:
-                if "votes" not in item:
-                    item["votes"] = 0
-            
-            # Verify files exist and sort
-            valid_items = [item for item in items 
-                         if os.path.exists(os.path.join("static/gallery", item["filename"]))]
-            
+        with open(gallery_file, "r") as f:
+            items = json.load(f)
+        
+        # Verify files exist and clean up data
+        valid_items = []
+        for item in items:
+            filepath = os.path.join("static/gallery", item["filename"])
+            if os.path.exists(filepath):
+                # Ensure all fields are properly formatted
+                try:
+                    cleaned_item = {
+                        "id": str(item["id"]),
+                        "filename": str(item["filename"]),
+                        "description": str(item.get("description", "")),
+                        "reflection": str(item.get("reflection", "")),
+                        "timestamp": str(item.get("timestamp", "")),
+                        "votes": int(item.get("votes", 0)),
+                        "has_reflection": bool(item.get("reflection")),
+                        "pixel_count": int(item.get("pixel_count", 0))
+                    }
+                    valid_items.append(cleaned_item)
+                except (ValueError, TypeError) as e:
+                    logger.error(f"Error cleaning gallery item: {e}")
+                    continue
+        
+        # Sort items
+        try:
             if sort == "votes":
-                valid_items.sort(key=lambda x: x.get("votes", 0), reverse=True)
+                # Sort by votes (highest first), then by timestamp (newest first) for ties
+                valid_items.sort(key=lambda x: (-x["votes"], x["timestamp"]), reverse=True)
             else:  # sort by new (default)
                 valid_items.sort(key=lambda x: x["timestamp"], reverse=True)
-                
-            return valid_items
-        return []
+        except Exception as sort_error:
+            logger.error(f"Error sorting gallery items: {sort_error}")
+            # Fallback to timestamp sort
+            valid_items.sort(key=lambda x: x["timestamp"], reverse=True)
+        
+        # Apply pagination
+        total_items = len(valid_items)
+        start_idx = min(offset, total_items)
+        end_idx = min(offset + limit, total_items)
+        paginated_items = valid_items[start_idx:end_idx]
+        
+        # Save cleaned data back to file
+        try:
+            with open(gallery_file, "w") as f:
+                json.dump(valid_items, f, indent=2)
+        except Exception as save_error:
+            logger.error(f"Error saving cleaned gallery data: {save_error}")
+        
+        return {
+            "items": paginated_items,
+            "total": total_items,
+            "page": offset // limit + 1 if limit > 0 else 1,
+            "has_more": end_idx < total_items
+        }
+        
     except Exception as e:
         logger.error(f"Error loading gallery: {e}")
-        return []
+        raise HTTPException(status_code=500, detail="Error loading gallery")
 
 @app.get("/static/gallery/{filename}")
 async def get_gallery_image(filename: str):
@@ -603,30 +943,116 @@ async def get_gallery_image(filename: str):
 
 @app.post("/api/gallery/{image_id}/upvote")
 async def upvote_image(image_id: str):
-    """Upvote a gallery image"""
+    """Upvote a gallery image with proper error handling and data validation"""
     try:
         gallery_file = "data/gallery_data.json"
-        if os.path.exists(gallery_file):
+        if not os.path.exists(gallery_file):
+            raise HTTPException(status_code=404, detail="Gallery not found")
+        
+        # Create backup before modification
+        backup_file = f"{gallery_file}.backup"
+        try:
             with open(gallery_file, "r") as f:
                 items = json.load(f)
-            
-            # Find and update the image
-            for item in items:
-                if item["id"] == image_id:
-                    # Initialize votes if not present
-                    if "votes" not in item:
-                        item["votes"] = 0
-                    item["votes"] += 1
+                with open(backup_file, "w") as bf:
+                    json.dump(items, bf, indent=2)
+        except Exception as backup_error:
+            logger.error(f"Error creating backup: {backup_error}")
+            raise HTTPException(status_code=500, detail="Error processing vote")
+        
+        # Find and update the image
+        image_found = False
+        for item in items:
+            if str(item.get("id", "")) == str(image_id):
+                image_found = True
+                try:
+                    # Ensure votes is an integer and increment
+                    current_votes = int(item.get("votes", 0))
+                    item["votes"] = current_votes + 1
                     
                     # Save updated data
                     with open(gallery_file, "w") as f:
                         json.dump(items, f, indent=2)
-                    return {"success": True, "votes": item["votes"]}
-            
+                    
+                    # Remove backup after successful save
+                    if os.path.exists(backup_file):
+                        os.remove(backup_file)
+                    
+                    # Broadcast update to all connected clients
+                    await generator.broadcast_state({
+                        "type": "vote_update",
+                        "image_id": image_id,
+                        "votes": item["votes"]
+                    })
+                    
+                    return {
+                        "success": True,
+                        "votes": item["votes"],
+                        "image_id": image_id
+                    }
+                except Exception as save_error:
+                    logger.error(f"Error saving votes: {save_error}")
+                    # Restore from backup
+                    if os.path.exists(backup_file):
+                        os.replace(backup_file, gallery_file)
+                    raise HTTPException(status_code=500, detail="Error saving vote")
+        
+        if not image_found:
             raise HTTPException(status_code=404, detail="Image not found")
+            
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error upvoting image: {e}")
         raise HTTPException(status_code=500, detail="Error processing upvote")
+
+@app.get("/api/gallery/{image_id}/reflection")
+async def get_reflection(image_id: str):
+    """Get reflection for a specific image"""
+    try:
+        gallery_file = "data/gallery_data.json"
+        if not os.path.exists(gallery_file):
+            raise HTTPException(status_code=404, detail="Gallery not found")
+            
+        with open(gallery_file, "r") as f:
+            items = json.load(f)
+        
+        for item in items:
+            if item["id"] == image_id:
+                return {
+                    "success": True,
+                    "reflection": item.get("reflection", "No reflection available"),
+                    "description": item.get("description", "")
+                }
+        
+        raise HTTPException(status_code=404, detail="Image not found")
+            
+    except Exception as e:
+        logger.error(f"Error getting reflection: {e}")
+        raise HTTPException(status_code=500, detail="Error retrieving reflection")
+
+@app.get("/api/gallery/{image_id}")
+async def get_gallery_item(image_id: str):
+    """Get a single gallery item by ID"""
+    try:
+        gallery_file = "data/gallery_data.json"
+        if not os.path.exists(gallery_file):
+            raise HTTPException(status_code=404, detail="Gallery not found")
+            
+        with open(gallery_file, "r") as f:
+            items = json.load(f)
+        
+        for item in items:
+            if item["id"] == image_id:
+                filepath = os.path.join("static/gallery", item["filename"])
+                if os.path.exists(filepath):
+                    return item
+                    
+        raise HTTPException(status_code=404, detail="Image not found")
+        
+    except Exception as e:
+        logger.error(f"Error getting gallery item: {e}")
+        raise HTTPException(status_code=500, detail="Error retrieving gallery item")
 
 if __name__ == "__main__":
     import uvicorn
