@@ -20,3 +20,4 @@ requests==2.31.0
 aiohttp==3.9.1
 mysqlclient==2.2.1
 psutil==5.9.8
+fastapi-cache2[inmemory]==0.2.1

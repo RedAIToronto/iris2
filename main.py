@@ -42,6 +42,11 @@ import urllib.request
 import certifi
 import socket
 import psutil
+from cachetools import TTLCache
+from functools import lru_cache
+from fastapi_cache import FastAPICache
+from fastapi_cache.backends.inmemory import InMemoryBackend
+from fastapi_cache.decorator import cache
 
 # Setup logging with minimal WebSocket logs
 logging.basicConfig(
@@ -474,7 +479,7 @@ IMPORTANT:
                 stroke_width = element["stroke_width"]
                 
                 if not points:
-                    logger.warning(f"⚠️ Element {i} has no points, skipping")
+                    logger.warning(f"⚠ Element {i} has no points, skipping")
                     continue
                 
                 # Calculate pixels for this element
@@ -911,20 +916,7 @@ async def migrate_gallery_data():
 class DatabaseService:
     def __init__(self):
         logger.info("Initializing PlanetScale database service...")
-        
-        # Check environment variables
-        required_vars = ["DATABASE_HOST", "DATABASE_USERNAME", "DATABASE_PASSWORD", "DATABASE"]
-        missing_vars = [var for var in required_vars if not os.getenv(var)]
-        
-        if missing_vars:
-            logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
-            raise ValueError(f"Missing environment variables: {', '.join(missing_vars)}")
-
-        # Log database config (without sensitive info)
-        logger.info(f"Database host: {os.getenv('DATABASE_HOST')}")
-        logger.info(f"Database name: {os.getenv('DATABASE')}")
-        logger.info(f"Database user: {os.getenv('DATABASE_USERNAME')}")
-
+        # Windows-specific SSL handling
         if os.name == 'nt':  # Windows
             import certifi
             ssl_cert = certifi.where()
@@ -949,84 +941,134 @@ class DatabaseService:
                 "ssl_mode": "VERIFY_IDENTITY",
                 "ssl": {"ca": "/etc/ssl/certs/ca-certificates.crt"}
             }
+        
+        self.pool_size = 5
+        self.pool = []
+        self._setup_connection_pool()
+        # Initialize cache with 5 second TTL
+        self.cache = TTLCache(maxsize=100, ttl=5)
 
-        # Test connection immediately
-        self._test_connection()
-        self._initialize_database()
-
-    def _test_connection(self):
-        """Test database connection"""
+    def _create_connection(self):
+        """Create a single database connection"""
         try:
-            with self.get_connection() as conn:
-                with conn.cursor() as cursor:
-                    cursor.execute("SELECT 1")
-                    logger.info("Database connection successful")
+            return MySQLdb.connect(**self.config)
         except Exception as e:
-            logger.error(f"Database connection failed: {e}")
-            raise
+            logger.error(f"Error creating connection: {e}")
+            return None
 
-    def _initialize_database(self):
-        """Initialize database tables"""
-        with self.get_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS gallery (
-                        id VARCHAR(255) PRIMARY KEY,
-                        url TEXT NOT NULL,
-                        description TEXT,
-                        reflection TEXT,
-                        timestamp DATETIME NOT NULL,
-                        votes INT DEFAULT 0,
-                        pixel_count INT DEFAULT 0
-                    )
-                """)
-                
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS system_state (
-                        state_key VARCHAR(255) PRIMARY KEY,
-                        state_value TEXT NOT NULL,
-                        updated_at DATETIME NOT NULL
-                    )
-                """)
-                logger.info("Database tables initialized successfully")
+    def _setup_connection_pool(self):
+        """Initialize connection pool"""
+        for _ in range(self.pool_size):
+            conn = self._create_connection()
+            if conn:
+                self.pool.append(conn)
+        logger.info(f"Connection pool initialized with {len(self.pool)} connections")
+
+    def _get_connection(self):
+        """Get a connection from the pool"""
+        while True:
+            if self.pool:
+                conn = self.pool.pop()
+                try:
+                    conn.ping(reconnect=True)
+                    return conn
+                except:
+                    conn = self._create_connection()
+                    if conn:
+                        return conn
+            else:
+                conn = self._create_connection()
+                if conn:
+                    return conn
+            time.sleep(0.1)
+
+    def _return_connection(self, conn):
+        """Return a connection to the pool"""
+        if len(self.pool) < self.pool_size:
+            self.pool.append(conn)
+        else:
+            conn.close()
 
     @contextmanager
     def get_connection(self):
         """Get database connection context"""
-        conn = MySQLdb.connect(**self.config)
+        conn = self._get_connection()
         try:
             yield conn
         finally:
-            conn.close()
+            self._return_connection(conn)
+
+    async def get_gallery_items(self, sort="new", limit=50, offset=0):
+        """Get gallery items with caching"""
+        cache_key = f"gallery:{sort}:{limit}:{offset}"
+        
+        # Try to get from cache first
+        if cache_key in self.cache:
+            logger.info("Returning gallery items from cache")
+            return self.cache[cache_key]
+
+        # If not in cache, get from database
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor(MySQLdb.cursors.DictCursor) as cursor:
+                    order_by = "timestamp DESC" if sort == "new" else "votes DESC"
+                    cursor.execute(f"""
+                        SELECT * FROM gallery 
+                        ORDER BY {order_by}
+                        LIMIT %s OFFSET %s
+                    """, (limit, offset))
+                    items = cursor.fetchall()
+                    
+                    # Convert datetime objects to strings
+                    for item in items:
+                        if isinstance(item['timestamp'], datetime):
+                            item['timestamp'] = item['timestamp'].isoformat()
+                    
+                    # Store in cache
+                    self.cache[cache_key] = items
+                    logger.info(f"Cached {len(items)} items with key {cache_key}")
+                    return items
+        except Exception as e:
+            logger.error(f"Database error: {e}")
+            return []
 
     async def get_last_generation_time(self):
         """Get last generation time from database"""
         try:
             with self.get_connection() as conn:
-                with conn.cursor() as cursor:
+                with conn.cursor(MySQLdb.cursors.DictCursor) as cursor:
                     cursor.execute("""
-                        SELECT state_value FROM system_state 
-                        WHERE state_key = 'last_generation_time'
+                        SELECT timestamp 
+                        FROM gallery 
+                        ORDER BY timestamp DESC 
+                        LIMIT 1
                     """)
                     result = cursor.fetchone()
                     if result:
-                        return datetime.fromisoformat(result[0])
-                    return datetime.now() - timedelta(minutes=5)
+                        return datetime.fromisoformat(str(result['timestamp']))
+                    return datetime.now() - timedelta(minutes=5)  # Default to 5 minutes ago
         except Exception as e:
             logger.error(f"Error getting last generation time: {e}")
-            return datetime.now() - timedelta(minutes=5)
+            return datetime.now() - timedelta(minutes=5)  # Safe default
 
     async def update_last_generation_time(self, timestamp):
-        """Update last generation time in database"""
-        with self.get_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute("""
-                    INSERT INTO system_state (state_key, state_value, updated_at)
-                    VALUES ('last_generation_time', %s, NOW())
-                    ON DUPLICATE KEY UPDATE 
-                    state_value = VALUES(state_value),
-                    updated_at = NOW()
-                """, (timestamp.isoformat(),))
+        """Update last generation time"""
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        UPDATE system_state 
+                        SET value = %s, 
+                            updated_at = NOW() 
+                        WHERE key = 'last_generation_time'
+                    """, (timestamp.isoformat(),))
+                    if cursor.rowcount == 0:  # If no row exists
+                        cursor.execute("""
+                            INSERT INTO system_state (key, value, updated_at)
+                            VALUES ('last_generation_time', %s, NOW())
+                        """, (timestamp.isoformat(),))
+        except Exception as e:
+            logger.error(f"Error updating last generation time: {e}")
 
 # Then create the service instance
 db_service = DatabaseService()
@@ -1039,6 +1081,8 @@ generator = ArtGenerator()
 async def lifespan(app: FastAPI):
     try:
         logger.info("Initializing IRIS...")
+        # Initialize cache
+        FastAPICache.init(InMemoryBackend(), prefix="fastapi-cache")
         await generator.initialize()  # Initialize async components
         asyncio.create_task(generator.start())
         logger.info("IRIS initialized successfully")
@@ -1217,17 +1261,35 @@ async def get_status():
 
 # Update the gallery endpoints to use the database service
 @app.get("/api/gallery")
+@cache(expire=5)  # Cache for 5 seconds
 async def get_gallery(sort: str = "new", limit: int = 50, offset: int = 0):
     """Get gallery items with caching"""
     try:
-        items = await gallery_cache.get_or_fetch(sort, limit, offset)
-        return {
-            "success": True,
-            "items": items,
-            "total": len(items)
-        }
+        logger.info(f"Fetching gallery items from PlanetScale (sort: {sort}, limit: {limit}, offset: {offset})")
+        with db_service.get_connection() as conn:
+            with conn.cursor(MySQLdb.cursors.DictCursor) as cursor:
+                # Get items with sorting
+                order_by = "timestamp DESC" if sort == "new" else "votes DESC"
+                cursor.execute(f"""
+                    SELECT * FROM gallery 
+                    ORDER BY {order_by}
+                    LIMIT %s OFFSET %s
+                """, (limit, offset))
+                items = cursor.fetchall()
+                
+                # Convert datetime objects to strings
+                for item in items:
+                    if isinstance(item['timestamp'], datetime):
+                        item['timestamp'] = item['timestamp'].isoformat()
+
+                logger.info(f"Retrieved {len(items)} items from PlanetScale")
+                return {
+                    "success": True,
+                    "items": items,
+                    "total": len(items)
+                }
     except Exception as e:
-        logger.error(f"Error loading gallery: {e}")
+        logger.error(f"Error loading gallery: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
 
 @app.get("/static/gallery/{filename}")
