@@ -911,6 +911,20 @@ async def migrate_gallery_data():
 class DatabaseService:
     def __init__(self):
         logger.info("Initializing PlanetScale database service...")
+        
+        # Check environment variables
+        required_vars = ["DATABASE_HOST", "DATABASE_USERNAME", "DATABASE_PASSWORD", "DATABASE"]
+        missing_vars = [var for var in required_vars if not os.getenv(var)]
+        
+        if missing_vars:
+            logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
+            raise ValueError(f"Missing environment variables: {', '.join(missing_vars)}")
+
+        # Log database config (without sensitive info)
+        logger.info(f"Database host: {os.getenv('DATABASE_HOST')}")
+        logger.info(f"Database name: {os.getenv('DATABASE')}")
+        logger.info(f"Database user: {os.getenv('DATABASE_USERNAME')}")
+
         if os.name == 'nt':  # Windows
             import certifi
             ssl_cert = certifi.where()
@@ -935,7 +949,21 @@ class DatabaseService:
                 "ssl_mode": "VERIFY_IDENTITY",
                 "ssl": {"ca": "/etc/ssl/certs/ca-certificates.crt"}
             }
+
+        # Test connection immediately
+        self._test_connection()
         self._initialize_database()
+
+    def _test_connection(self):
+        """Test database connection"""
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT 1")
+                    logger.info("Database connection successful")
+        except Exception as e:
+            logger.error(f"Database connection failed: {e}")
+            raise
 
     def _initialize_database(self):
         """Initialize database tables"""
@@ -1190,37 +1218,16 @@ async def get_status():
 # Update the gallery endpoints to use the database service
 @app.get("/api/gallery")
 async def get_gallery(sort: str = "new", limit: int = 50, offset: int = 0):
-    """Get gallery items with sorting and pagination"""
+    """Get gallery items with caching"""
     try:
-        logger.info(f"Fetching gallery items from PlanetScale (sort: {sort}, limit: {limit}, offset: {offset})")
-        with db_service.get_connection() as conn:
-            with conn.cursor(MySQLdb.cursors.DictCursor) as cursor:
-                # Get items with sorting
-                order_by = "timestamp DESC" if sort == "new" else "votes DESC"
-                query = f"""
-                    SELECT * FROM gallery 
-                    ORDER BY {order_by}
-                    LIMIT %s OFFSET %s
-                """
-                logger.info(f"Executing query: {query} with params: {limit}, {offset}")
-                cursor.execute(query, (limit, offset))
-                items = cursor.fetchall()
-                
-                # Convert datetime objects to strings for JSON serialization
-                for item in items:
-                    if isinstance(item['timestamp'], datetime):
-                        item['timestamp'] = item['timestamp'].isoformat()
-
-                logger.info(f"Retrieved {len(items)} items from PlanetScale")
-                logger.info(f"First item: {items[0] if items else None}")
-
-                return {
-                    "success": True,
-                    "items": items,
-                    "total": len(items)
-                }
+        items = await gallery_cache.get_or_fetch(sort, limit, offset)
+        return {
+            "success": True,
+            "items": items,
+            "total": len(items)
+        }
     except Exception as e:
-        logger.error(f"Error loading gallery: {e}", exc_info=True)
+        logger.error(f"Error loading gallery: {e}")
         return {"success": False, "error": str(e)}
 
 @app.get("/static/gallery/{filename}")
